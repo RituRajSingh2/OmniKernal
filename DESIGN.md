@@ -28,15 +28,16 @@ It is a **platform framework** — one that a developer (or AI assistant) can us
 ## 2. Phase Overview
 
 ```
-Phase 0 → Foundation & Contracts
-Phase 1 → Microkernel Core Engine
-Phase 2 → Database Layer
-Phase 3 → Plugin Layer (v1)
-Phase 4 → Platform Adapter Layer (SDK-Agnostic Adapter Pack System)
-Phase 5 → Profile Management
-Phase 6 → Execution Modes (Self / Co-op)
-Phase 7 → Performance Evaluation & Research
-Phase 8 → Future Enhancements (Deferred)
+Phase 0   → Foundation & Contracts
+Phase 1   → Microkernel Core Engine
+Phase 2   → Database Layer
+Phase 2.5 → Security & Resilience Layer          ← NEW
+Phase 3   → Plugin Layer (v1)
+Phase 4   → Platform Adapter Layer (SDK-Agnostic Adapter Pack System)
+Phase 5   → Profile Management
+Phase 6   → Execution Modes (Self / Co-op)
+Phase 7   → Performance Evaluation & Research
+Phase 8   → Future Enhancements (Deferred)
 ```
 
 ---
@@ -121,34 +122,259 @@ Replace all file-based lookups with a proper DB. This is the **only source of tr
 
 ### What We Build
 
+**Core Data Tables:**
+
 | Table | Purpose |
 |---|---|
 | `plugins` | Registered plugin registry |
 | `plugin_metadata` | Extended plugin info (version, platform support) |
 | `tools` | Tool registry (command → plugin mapping) |
-| `tool_requirements` | API key requirements, permission flags |
+| `tool_requirements` | API key requirements (stored encrypted), permission flags |
 | `execution_logs` | Immutable audit log of every execution |
 | `routing_rules` | Custom routing overrides |
 
+**Health & Resilience Tables (designed here, enforced in Phase 2.5):**
+
+| Table | Purpose |
+|---|---|
+| `api_health` | Tracks error count, last error timestamp, status per external API |
+| `dead_apis` | APIs that exceeded the error threshold — quarantined here automatically |
+
+`api_health` schema:
+```
+api_health:
+  id           UUID PK
+  tool_id      FK → tools.id
+  api_url      TEXT NOT NULL
+  error_count  INTEGER DEFAULT 0
+  last_error   TIMESTAMP
+  last_success TIMESTAMP
+  status       ENUM('active', 'degraded', 'dead') DEFAULT 'active'
+  created_at   TIMESTAMP
+```
+
+`dead_apis` schema:
+```
+dead_apis:
+  id           UUID PK
+  api_url      TEXT NOT NULL
+  tool_id      FK → tools.id
+  error_count  INTEGER
+  killed_at    TIMESTAMP         ← When threshold was crossed
+  kill_reason  TEXT              ← Last error message
+  reactivated  BOOLEAN DEFAULT FALSE
+```
+
 | Module | Responsibility |
 |---|---|
-| `src/database/models.py` | SQLAlchemy ORM models |
+| `src/database/models.py` | SQLAlchemy ORM models (all tables above) |
 | `src/database/session.py` | Async session factory |
-| `src/database/repository.py` | Repository pattern — PluginRepo, ToolRepo, LogRepo |
+| `src/database/repository.py` | Repository pattern — PluginRepo, ToolRepo, LogRepo, ApiHealthRepo |
 | `src/database/migrations/` | Alembic migration scripts |
 
 ### DB Stack
 - **Engine:** SQLite (default, zero-setup) → swappable to PostgreSQL/MySQL via env var
-- **ORM:** SQLAlchemy 2.x async
+- **ORM:** SQLAlchemy 2.x async — **all queries via ORM only (no raw SQL strings)**
 - **Migrations:** Alembic
+
+### SQLAlchemy as the SQL Injection Firewall
+
+SQLAlchemy's ORM and `text()` with `bindparams` ensure **no raw string interpolation** ever
+reaches the DB engine. This is enforced by a repository layer rule:
+
+> **Rule:** No module outside `src/database/repository.py` may write a SQL query.  
+> All DB access goes through typed repository methods with bound parameters.
+
+```python
+# BANNED anywhere in the codebase:
+session.execute(f"SELECT * FROM tools WHERE name = '{user_input}'")  # ❌
+
+# ONLY this is allowed:
+repo.get_tool_by_name(name=user_input)  # ✅ — parameterized internally
+```
+
+A ruff lint rule + PR check will enforce this at diff-time.
 
 ### What We Do NOT Build in Phase 2
 - Redis / distributed caching (Phase 8)
 - Multi-node DB coordination (Phase 8)
+- The actual Security enforcement logic (that's Phase 2.5)
 
 ### Exit Criteria
-- DB boots, tables created, basic CRUD for plugins/tools works
-- Repo layer is tested with an in-memory SQLite DB
+- DB boots, all tables created including `api_health` and `dead_apis`
+- Basic CRUD for plugins/tools works
+- Repo layer tested with in-memory SQLite
+- Zero raw SQL strings exist anywhere outside `repository.py`
+
+---
+
+## 5.5. Phase 2.5 — Security & Resilience Layer
+
+> **Depends on:** Phase 2 (DB tables `api_health`, `dead_apis`, `tool_requirements` already created)  
+> **Must complete before:** Phase 3 (plugins call external APIs — dead API tracking must be active)
+
+### Goal
+Build all security and resilience mechanisms in one focused phase **before** plugins go live.
+Once external APIs and user inputs are in the picture, these systems must already be running.
+
+Three sub-systems to build:
+
+1. **Encryption / Decryption** — sensitive data at rest
+2. **Injection Prevention** — SQL injection + prompt/command injection
+3. **Dead API Watchdog** — automatic API health tracking and quarantine
+
+---
+
+### Sub-system 1: Encryption / Decryption
+
+**What gets encrypted:**
+
+| Data | Location | Encrypted? |
+|---|---|---|
+| API keys | `tool_requirements.api_key_value` (DB column) | ✅ Fernet symmetric |
+| Profile session tokens / cookies | `profiles/<name>/metadata.json` | ✅ Fernet symmetric |
+| Profile metadata sensitive fields | `profiles/<name>/metadata.json` | ✅ Fernet symmetric |
+| Plugin manifests | `plugins/<name>/manifest.json` | ❌ Plain — not sensitive |
+| Routing rules | `routing_rules` table | ❌ Plain — not sensitive |
+| Execution logs | `execution_logs` table | ❌ Plain — audit trail must be readable |
+
+**What We Build:**
+
+| Module | Responsibility |
+|---|---|
+| `src/security/encryption.py` | `EncryptionEngine` — Fernet key management, `encrypt(data)`, `decrypt(data)` |
+| `src/security/key_store.py` | Master key loading — from env var `OMNIKERNAL_SECRET_KEY` or a key file |
+
+Rule: **The encryption key is never stored in the DB.** It lives in an environment variable
+or an OS-level keyfile. The DB only stores ciphertext.
+
+**Encryption flow for API keys:**
+```
+Plugin registers API key
+  → SecurityLayer.encrypt(api_key)
+  → Stores ciphertext in tool_requirements.api_key_value
+
+Plugin needs API key
+  → Repo fetches ciphertext
+  → SecurityLayer.decrypt(ciphertext)
+  → Returns plaintext to plugin scope only — never logged
+```
+
+**Profile metadata encryption:**
+```
+Profile created
+  → Manager writes metadata.json with sensitive fields encrypted
+  → On load: Manager decrypts in-memory, never writes plaintext back to disk
+```
+
+---
+
+### Sub-system 2: Injection Prevention
+
+**Two injection vectors to protect against:**
+
+#### A. SQL Injection
+Already structurally prevented in Phase 2 (all DB access through parameterized repository methods).
+Phase 2.5 adds the **enforcement layer**:
+
+| Item | Purpose |
+|---|---|
+| `src/security/sanitizer.py` | `SqlSanitizer.validate(value)` — rejects strings containing SQL metacharacters before they reach the repo |
+| Ruff custom rule | Bans raw `session.execute(f"...")` patterns at lint time |
+| `tests/security/test_sql_injection.py` | Fuzzing tests — feeds known SQL injection payloads, asserts all are rejected |
+
+#### B. Prompt / Command Injection
+Users on messaging platforms can craft malicious command strings.
+Examples of what must be blocked:
+```
+!echo hello; DROP TABLE plugins     ← Command chaining
+!echo $(rm -rf /)                   ← Shell injection
+!cmd\n!admin_cmd                    ← Newline injection to add hidden command
+!{plugin.internal_method()}         ← Template injection
+```
+
+| Item | Purpose |
+|---|---|
+| `src/security/sanitizer.py` | `CommandSanitizer.sanitize(raw_input)` — strips shell metacharacters, newlines, template markers |
+| `src/core/parser.py` (Phase 1) | Must call `CommandSanitizer` **before** pattern matching — Phase 1 adds the hook, Phase 2.5 fills it |
+| Allowlist-based parsing | Parser only accepts commands declared in the plugin's `manifest.json` — anything else is rejected |
+
+**Sanitization is not blacklist-based. It is allowlist-based:**
+> A command is valid only if it matches a declared pattern from a registered plugin manifest.
+> There is no "pass-through" for unrecognised input.
+
+---
+
+### Sub-system 3: Dead API Watchdog
+
+External APIs fail. When they fail repeatedly, they drag down plugin execution and waste retries.
+The Watchdog tracks API health in real-time and automatically quarantines dead APIs.
+
+**Error Threshold Rule:**
+> If an external API endpoint returns an error **3 or more consecutive times**,  
+> it is automatically moved to the `dead_apis` table and disabled.
+
+**Watchdog Flow:**
+```
+Plugin calls external API
+  → API returns error
+  → Watchdog.record_failure(api_url, tool_id, error_msg)
+    → Increments api_health.error_count
+    → Sets api_health.status = 'degraded' if count == 1 or 2
+    → If error_count >= 3:
+        → Sets api_health.status  = 'dead'
+        → Inserts row into dead_apis
+        → Calls ToolRegistry.disable_tool(tool_id)
+        → Logger.warn("API quarantined: {api_url}")
+
+Plugin calls external API
+  → API returns success
+  → Watchdog.record_success(api_url)
+    → Resets api_health.error_count = 0
+    → Sets api_health.status = 'active'
+    → Sets api_health.last_success = now()
+```
+
+**Status States:**
+
+| Status | Meaning |
+|---|---|
+| `active` | API healthy, error_count = 0 |
+| `degraded` | 1 or 2 consecutive errors — still operational, alerting |
+| `dead` | 3+ consecutive errors — quarantined, tool disabled |
+
+**What We Build:**
+
+| Module | Responsibility |
+|---|---|
+| `src/security/watchdog.py` | `ApiWatchdog` — `record_failure()`, `record_success()`, `is_dead(api_url)` |
+| `src/database/repository.py` | `ApiHealthRepo.increment_error()`, `ApiHealthRepo.quarantine()`, `ApiHealthRepo.reset()` |
+| `src/core/engine.py` (hook) | Core wraps every plugin API call with the Watchdog — plugins never call APIs directly without going through it |
+
+**Reactivation:**
+Dead APIs are NOT auto-reactivated. A developer must:
+1. Fix the API issue
+2. Call `ApiHealthRepo.reactivate(api_url)` which sets `dead_apis.reactivated = True`
+   and resets `api_health.error_count = 0`
+3. Or use a future admin CLI command (Phase 7+)
+
+This is intentional — silent auto-recovery can mask real infrastructure failures.
+
+---
+
+### What We Do NOT Build in Phase 2.5
+- Rate limiting (future)
+- OAuth / token rotation (future)
+- Intrusion detection (future)
+- Automated API reactivation (intentionally deferred)
+
+### Exit Criteria
+- `EncryptionEngine.encrypt()` / `decrypt()` roundtrip passes tests
+- API key stored encrypted in DB, decrypted only in plugin scope
+- SQL injection fuzzing tests: 20 known payloads, all blocked
+- Command injection fuzzing tests: 10 known payloads, all blocked
+- Dead API Watchdog: 3 failures → quarantine confirmed in `dead_apis`, tool disabled
+- 1 success → `error_count` reset confirmed
 
 ---
 
@@ -469,7 +695,8 @@ Validate the architecture against the research performance targets from the Blue
 |---|---|---|
 | **Phase 0** | Interfaces + Contracts + `pyproject.toml` | 🔴 First |
 | **Phase 1** | Core Engine (dispatcher, parser, router) | 🔴 Critical |
-| **Phase 2** | Database Layer (SQLAlchemy + Alembic) | 🔴 Critical |
+| **Phase 2** | Database Layer (SQLAlchemy + Alembic + Health tables) | 🔴 Critical |
+| **Phase 2.5** | Security & Resilience (Encryption, Injection Guards, Dead API Watchdog) | 🔴 Critical |
 | **Phase 3** | Plugin Layer + Echo plugin smoke test | 🟠 High |
 | **Phase 4** | Adapter Pack System + Playwright reference pack | 🟠 High |
 | **Phase 5** | Profile Management + Lock files | 🟡 Medium |
@@ -492,6 +719,10 @@ These rules must hold at every phase. Any PR that violates them should be reject
 7. **Every execution is logged.** No silent failures.
 8. **Profile isolation is enforced at the OS level.** Separate dirs, separate lock files, separate PIDs.
 9. **Headless mode is automatic at >= 2 active profiles.**
+10. **API keys are never stored in plaintext.** DB column `tool_requirements.api_key_value` holds only Fernet ciphertext. Decryption happens in plugin scope only — never in the Core, never in logs.
+11. **No raw SQL strings outside `repository.py`.** All DB queries use SQLAlchemy ORM or `bindparams`. Enforced by lint rule.
+12. **All user-facing input passes through `CommandSanitizer` before parsing.** No raw message text ever reaches the router.
+13. **Dead API threshold is 3 consecutive errors.** Crossing it automatically quarantines the API and disables the dependent tool. No silent degradation.
 
 ---
 
@@ -525,10 +756,16 @@ OmniKernal/
 │   │   ├── plugin_manifest.py
 │   │   └── routing_rule.py
 │   ├── database/
-│   │   ├── models.py
+│   │   ├── models.py          ← All tables incl. api_health, dead_apis
 │   │   ├── session.py
-│   │   ├── repository.py
+│   │   ├── repository.py      ← Only place SQL queries are written
 │   │   └── migrations/
+│   ├── security/
+│   │   ├── __init__.py
+│   │   ├── encryption.py      ← EncryptionEngine (Fernet)
+│   │   ├── key_store.py       ← Master key loader (env/keyfile)
+│   │   ├── sanitizer.py       ← CommandSanitizer + SqlSanitizer
+│   │   └── watchdog.py        ← ApiWatchdog (dead API tracking)
 │   ├── adapters/
 │   │   ├── loader.py          ← AdapterLoader (discovers adapter_packs/)
 │   │   ├── registry.py        ← AdapterRegistry (platform name → instance)

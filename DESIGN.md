@@ -32,7 +32,7 @@ Phase 0 → Foundation & Contracts
 Phase 1 → Microkernel Core Engine
 Phase 2 → Database Layer
 Phase 3 → Plugin Layer (v1)
-Phase 4 → Platform Adapter Layer (Playwright/WhatsApp)
+Phase 4 → Platform Adapter Layer (SDK-Agnostic Adapter Pack System)
 Phase 5 → Profile Management
 Phase 6 → Execution Modes (Self / Co-op)
 Phase 7 → Performance Evaluation & Research
@@ -52,7 +52,7 @@ Lay the skeleton. Define interfaces before any implementation. Write zero logic 
 |---|---|
 | `pyproject.toml` | uv-managed deps, build config, tooling |
 | `src/__init__.py` | Package root |
-| `src/core/interfaces/` | Abstract base classes — `PlatformAdapter`, `BasePlugin`, `BaseCommand` |
+| `src/core/interfaces/` | Abstract base classes — `PlatformAdapter`, `BasePlugin`, `BaseCommand`, `BaseSession` |
 | `src/core/contracts/` | Dataclasses / TypedDicts for `Message`, `User`, `PluginManifest`, `RoutingRule` |
 | `tests/` scaffold | Empty test stubs for every interface |
 | `DESIGN.md` (this file) | Architecture decision record |
@@ -60,7 +60,7 @@ Lay the skeleton. Define interfaces before any implementation. Write zero logic 
 ### What We Do NOT Build in Phase 0
 - Any real plugin implementation
 - Database schema (comes in Phase 2)
-- Playwright adapter (comes in Phase 4)
+- Any real adapter pack (comes in Phase 4)
 - CLI tooling
 
 ### Exit Criteria
@@ -192,37 +192,165 @@ plugins/
 
 ---
 
-## 7. Phase 4 — Platform Adapter Layer (Playwright / WhatsApp)
+## 7. Phase 4 — Platform Adapter Layer (SDK-Agnostic Adapter Pack System)
 
-### Goal
-Build the first real platform adapter. Connect the Core to WhatsApp Web via Playwright.
+### The Problem with a Playwright-First Design
 
-### What We Build
+If Phase 4 is written as *"build a Playwright adapter"*, we have accidentally introduced a hidden
+coupling. The Core would implicitly assume browser-based DOM automation. Adding Baileys later
+would require rewriting assumptions, not just adding a new folder.
 
-| Module | Purpose |
-|---|---|
-| `src/adapters/base.py` | `PlatformAdapter` ABC (already from Phase 0) |
-| `src/adapters/playwright_whatsapp/` | Playwright-based WhatsApp adapter |
-| `src/adapters/playwright_whatsapp/session.py` | Browser session management |
-| `src/adapters/playwright_whatsapp/message_reader.py` | Reads incoming messages from DOM |
-| `src/adapters/playwright_whatsapp/message_sender.py` | Sends replies via DOM interaction |
+The fix: **Adapters are Packs, not implementations baked into the Core.**
 
-### Adapter Interface (enforced from Phase 0)
-```python
-class PlatformAdapter(ABC):
-    async def send_message(self, to: str, content: str) -> None: ...
-    async def receive_message(self) -> Message: ...
-    async def get_user(self, user_id: str) -> User: ...
+---
+
+### The Adapter Pack Model
+
+An **Adapter Pack** is a self-contained folder that any SDK author can write.  
+The Core discovers it, validates it, and calls it — **without knowing what SDK is inside**.
+
+The pack author provides:
+- A descriptor file (`adapter.yaml`) declaring what this pack is and what it can do
+- Python implementation files that use the native SDK to fulfil the Core's interface contract
+
+The Core provides:
+- The `PlatformAdapter` ABC — the contract every pack must honour
+- The `AdapterLoader` — discovers, validates, and dynamically loads packs
+- The `AdapterRegistry` — maps platform names to loaded adapter instances
+
+---
+
+### Adapter Pack Folder Structure (Enforced)
+
+```
+adapter_packs/
+  <pack_name>/
+    adapter.yaml          ← Descriptor: name, platform, sdk, version, capabilities
+    session.py            ← Implements: session lifecycle (connect, disconnect, status)
+    sender.py             ← Implements: send_message(to, content, media?)
+    receiver.py           ← Implements: receive_message() -> Message  (polling or webhook)
+    user.py               ← Implements: get_user(user_id) -> User
+    requirements.txt      ← SDK-specific pip deps (optional, uv reads this at load time)
 ```
 
+**`adapter.yaml` format:**
+```yaml
+name: whatsapp-playwright
+platform: whatsapp
+sdk: playwright
+version: "1.0.0"
+author: BITS-Rohit
+capabilities:
+  - send_text
+  - receive_text
+  - send_media
+  - receive_media
+entry_points:
+  session:  session.py::PlaywrightSession
+  sender:   sender.py::PlaywrightSender
+  receiver: receiver.py::PlaywrightReceiver
+  user:     user.py::PlaywrightUserResolver
+```
+
+---
+
+### How the Core Interacts with an Adapter Pack
+
+```
+Core boots
+  → AdapterLoader scans adapter_packs/
+  → Reads adapter.yaml for each pack
+  → Validates schema (capabilities, entry_points)
+  → Dynamically imports the .py entry points
+  → Wraps them in the PlatformAdapter interface
+  → Registers in AdapterRegistry
+
+Core receives a routing decision:
+  → Looks up AdapterRegistry by platform name
+  → Calls adapter.send_message(to, content)
+  → Adapter pack calls its native SDK internally
+  → Core never sees SDK-specific code
+```
+
+The Core calls **only** the `PlatformAdapter` contract interface. It never calls `playwright`,
+`baileys`, or any SDK directly.
+
+---
+
+### Core Interface Contract (defined in Phase 0, locked here)
+
+```python
+class PlatformAdapter(ABC):
+    """Every adapter pack must satisfy this contract."""
+
+    @abstractmethod
+    async def connect(self) -> None: ...
+
+    @abstractmethod
+    async def disconnect(self) -> None: ...
+
+    @abstractmethod
+    async def send_message(self, to: str, content: str) -> None: ...
+
+    @abstractmethod
+    async def receive_message(self) -> Message: ...
+
+    @abstractmethod
+    async def get_user(self, user_id: str) -> User: ...
+
+    @property
+    @abstractmethod
+    def platform_name(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def capabilities(self) -> list[str]: ...
+```
+
+---
+
+### What We Build in Phase 4
+
+| Item | Purpose |
+|---|---|
+| `src/adapters/loader.py` | `AdapterLoader` — discovers and validates adapter packs |
+| `src/adapters/registry.py` | `AdapterRegistry` — maps platform names → loaded adapters |
+| `src/adapters/validator.py` | Validates `adapter.yaml` schema before loading |
+| `adapter_packs/whatsapp_playwright/` | **First reference pack** — Playwright/WhatsApp Web |
+| `adapter_packs/whatsapp_playwright/adapter.yaml` | Pack descriptor |
+| `adapter_packs/whatsapp_playwright/session.py` | Browser session via Playwright |
+| `adapter_packs/whatsapp_playwright/sender.py` | DOM-based message sending |
+| `adapter_packs/whatsapp_playwright/receiver.py` | DOM polling for incoming messages |
+| `adapter_packs/whatsapp_playwright/user.py` | WhatsApp contact resolution |
+
+The Playwright pack is built **only as a reference implementation** — to prove the
+Adapters Pack system actually works. It does not set any Core constraints.
+
+---
+
+### Adding a New SDK Later (e.g. Baileys)
+
+A Baileys adapter author would:
+1. Create `adapter_packs/whatsapp_baileys/`
+2. Write `adapter.yaml` declaring `sdk: baileys`
+3. Write `sender.py`, `receiver.py`, `session.py`, `user.py` using Baileys native APIs
+4. Drop the folder — **no Core changes needed, zero.**
+
+The Core loads it identically to the Playwright pack.
+
+---
+
 ### What We Do NOT Build in Phase 4
-- Baileys adapter (deferred — Phase 8)
-- Business API adapter (deferred — Phase 8)
+- Baileys pack (any community contributor can add it — but we don't block on it)
+- Business API pack (different model — Phase 8)
+- Multi-adapter concurrency (running two adapters simultaneously — Phase 8)
 
 ### Exit Criteria
-- Adapter boots a browser, connects to WhatsApp Web
-- Receives a message and passes it to the Core
-- Core processes it and adapter sends a reply
+- `AdapterLoader` discovers `adapter_packs/whatsapp_playwright/` and loads it cleanly
+- `AdapterRegistry` returns the correct adapter for `platform="whatsapp"`
+- Core sends `!echo hello` through the adapter → Playwright sends the reply in WhatsApp Web
+- A **second mock adapter** (in-memory, no SDK) passes the same test — proving the system is
+  not Playwright-coupled
 
 ---
 
@@ -323,14 +451,15 @@ Validate the architecture against the research performance targets from the Blue
 
 | Feature | Reason Deferred |
 |---|---|
-| **Baileys Adapter** | Needs stable Core + Adapter contract first |
-| **Business API Adapter** | Different execution model — post-Phase 6 |
-| **Business Mode** | Requires API infra separate from Playwright |
-| **Redis async queue** | Only justified at 50+ concurrent users |
-| **Distributed plugin registry** | Single-node registry sufficient for Phase 3-6 |
-| **Cross-process session coordination** | Complexity not justified until multi-server scale |
-| **Horizontal scaling layer** | Research validation first |
-| **Plugin marketplace** | Ecosystem play — post v1.0 |
+| **Baileys Adapter Pack** | Adapter Pack system must be stable first (Phase 4). Then any contributor can add it independently. |
+| **Business API Adapter Pack** | Different execution model (no UI, pure API). Own phase post-Phase 6. |
+| **Business Mode** | Requires API infra separate from browser automation. |
+| **Multi-adapter concurrency** | Running Playwright + Baileys simultaneously — needs Phase 5 profile isolation first. |
+| **Redis async queue** | Only justified at 50+ concurrent users. |
+| **Distributed plugin registry** | Single-node sufficient for Phase 3-6. |
+| **Cross-process session coordination** | Complexity not justified until multi-server scale. |
+| **Horizontal scaling layer** | Research validation first. |
+| **Plugin marketplace** | Ecosystem play — post v1.0. |
 
 ---
 
@@ -342,7 +471,7 @@ Validate the architecture against the research performance targets from the Blue
 | **Phase 1** | Core Engine (dispatcher, parser, router) | 🔴 Critical |
 | **Phase 2** | Database Layer (SQLAlchemy + Alembic) | 🔴 Critical |
 | **Phase 3** | Plugin Layer + Echo plugin smoke test | 🟠 High |
-| **Phase 4** | Playwright WhatsApp Adapter | 🟠 High |
+| **Phase 4** | Adapter Pack System + Playwright reference pack | 🟠 High |
 | **Phase 5** | Profile Management + Lock files | 🟡 Medium |
 | **Phase 6** | Self Mode + Co-op Mode | 🟡 Medium |
 | **Phase 7** | Performance Benchmarking & Research | 🟢 Post-core |
@@ -356,11 +485,13 @@ These rules must hold at every phase. Any PR that violates them should be reject
 
 1. **The Core Engine never imports a platform SDK directly.** All platform interaction flows through `PlatformAdapter`.
 2. **The Core Engine never imports a plugin directly.** All plugin interaction flows through `BasePlugin` + the loader.
-3. **Plugins cannot talk to each other.** All cross-plugin communication (if ever needed) goes through Core.
-4. **The Database is the single source of truth.** No file-based plugin/tool detection in production.
-5. **Every execution is logged.** No silent failures.
-6. **Profile isolation is enforced at the OS level.** Separate dirs, separate lock files, separate PIDs.
-7. **Headless mode is automatic at >= 2 active profiles.**
+3. **An Adapter Pack is the only place where SDK-specific code lives.** No SDK import (`playwright`, `baileys`, etc.) may appear anywhere outside an `adapter_packs/<name>/` folder.
+4. **The Core validates an Adapter Pack via `adapter.yaml` before loading it.** No blind dynamic imports.
+5. **Plugins cannot talk to each other.** All cross-plugin communication (if ever needed) goes through Core.
+6. **The Database is the single source of truth.** No file-based plugin/tool detection in production.
+7. **Every execution is logged.** No silent failures.
+8. **Profile isolation is enforced at the OS level.** Separate dirs, separate lock files, separate PIDs.
+9. **Headless mode is automatic at >= 2 active profiles.**
 
 ---
 
@@ -399,8 +530,9 @@ OmniKernal/
 │   │   ├── repository.py
 │   │   └── migrations/
 │   ├── adapters/
-│   │   ├── base.py
-│   │   └── playwright_whatsapp/
+│   │   ├── loader.py          ← AdapterLoader (discovers adapter_packs/)
+│   │   ├── registry.py        ← AdapterRegistry (platform name → instance)
+│   │   └── validator.py       ← Validates adapter.yaml before loading
 │   ├── plugins/
 │   │   ├── loader.py
 │   │   ├── registry.py
@@ -418,6 +550,13 @@ OmniKernal/
 │       ├── manifest.json
 │       ├── commands.py
 │       └── permissions.json
+├── adapter_packs/
+│   └── whatsapp_playwright/    ← Reference Adapter Pack (SDK: Playwright)
+│       ├── adapter.yaml        ← Pack descriptor
+│       ├── session.py          ← connect() / disconnect()
+│       ├── sender.py           ← send_message()
+│       ├── receiver.py         ← receive_message()
+│       └── user.py             ← get_user()
 ├── tests/
 │   ├── test_core/
 │   ├── test_database/

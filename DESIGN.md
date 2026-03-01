@@ -381,40 +381,317 @@ This is intentional — silent auto-recovery can mask real infrastructure failur
 ## 6. Phase 3 — Plugin Layer (v1)
 
 ### Goal
-Define the strict plugin contract and load a real working plugin.
+Define the strict plugin contract and load a real working plugin.  
+**This phase locks the plugin folder structure permanently** — changing it later is a breaking
+change for every plugin author.
 
-### Plugin Structure (Enforced)
+---
+
+### The Architecture Decision: How Do Commands Map to Logic?
+
+Two approaches were considered. The decision record is here so it is never relitigated.
+
+---
+
+#### Option A — Monolithic `commands.py` (Rejected)
+
 ```
 plugins/
-  example_plugin/
-    manifest.json       ← Plugin name, version, platform, commands
-    commands.py         ← Command handlers
-    permissions.json    ← Permission flags per command
+  ytplugin/
+    manifest.json
+    commands.py         ← ALL logic + ALL routing lives here
+    permissions.json
 ```
 
-### What We Build
+Problems:
+- `commands.py` becomes a god file with 5+ commands — unscannable, untestable in isolation
+- The Core loader must **import and execute Python** just to discover what commands exist —
+  this is a security problem (arbitrary code runs on load)
+- No way to inspect what a plugin does without running it
+- Hard to enforce the standard handler signature across all commands
+- Plugin marketplaces cannot scan/validate a plugin without executing it
+
+**Rejected.**
+
+---
+
+#### Option B — Inline `COMMAND_MAP` in Python (Rejected)
+
+```python
+# commands.py
+COMMAND_MAP = {
+    "ytaudio": ytaudio_func,
+    "ytstats": ytstats_func,
+}
+```
+
+Slightly better than Option A — at least the routing is explicit.  
+Still the same problems: Python must execute to discover the map. The map is not
+inspectable without a running interpreter. Argument schema is undeclared.
+
+**Rejected.**
+
+---
+
+#### Option C — Declarative `commands.yaml` + `handlers/` (Chosen ✅)
+
+```
+plugins/
+  ytplugin/
+    manifest.json           ← Plugin identity (name, version, author, platform)
+    commands.yaml           ← Routing table — command → handler path + arg schema
+    permissions.json        ← Per-command permission flags
+    handlers/
+      ytaudio.py            ← User writes logic here
+      ytstats.py            ← User writes logic here
+```
+
+**Why this wins:**
+
+| Property | Option A | Option B | Option C |
+|---|---|---|---|
+| Core discovers commands without executing Python | ❌ | ❌ | ✅ |
+| Each command isolated in its own file | ❌ | ❌ | ✅ |
+| Arg schema declared and validated before execution | ❌ | ❌ | ✅ |
+| Future marketplace can scan without running | ❌ | ❌ | ✅ |
+| Boilerplate for a 1-command plugin | Low | Low | Low* |
+| Boilerplate for a 10-command plugin | Pain | Pain | Clean |
+
+\* Echo plugin: `commands.yaml` is 6 lines. `handlers/echo.py` is 3 lines. Acceptable.
+
+---
+
+### File Formats (Locked)
+
+#### `manifest.json`
+```json
+{
+  "name": "ytplugin",
+  "version": "1.0.0",
+  "author": "BITS-Rohit",
+  "description": "YouTube tools — audio download, channel stats",
+  "platform": ["whatsapp", "any"],
+  "min_core_version": "0.1.0"
+}
+```
+
+#### `commands.yaml` — The Routing Table
+```yaml
+commands:
+  ytaudio:
+    description: "Download YouTube audio and send as file"
+    pattern: "!ytaudio <url>"
+    handler: "handlers.ytaudio.run"      # module.path.function
+    requires_api: true                   # triggers API key check before execution
+    args:
+      - name: url
+        type: str
+        required: true
+        description: "YouTube video URL"
+
+  ytstats:
+    description: "Get YouTube channel statistics"
+    pattern: "!ytstats <channel>"
+    handler: "handlers.ytstats.run"
+    requires_api: true
+    args:
+      - name: channel
+        type: str
+        required: true
+        description: "YouTube channel name or @handle"
+```
+
+The `handler` field is a **dotted Python path relative to the plugin root**.  
+The loader resolves it as: `plugins/<plugin_name>/<handler>` → imports the module → calls the function.  
+**The Core never discovers handlers by scanning Python files.** It only reads `commands.yaml`.
+
+#### `permissions.json`
+```json
+{
+  "ytaudio": {
+    "allowed_roles": ["user", "admin"],
+    "blocked_users": [],
+    "rate_limit": "5/hour"
+  },
+  "ytstats": {
+    "allowed_roles": ["user", "admin"],
+    "blocked_users": [],
+    "rate_limit": "20/hour"
+  }
+}
+```
+
+---
+
+### Handler File Contract (Standardized)
+
+Every handler function **must** follow this exact signature:
+
+```python
+# handlers/ytaudio.py
+
+from omnikernal.core.contracts import CommandContext, CommandResult
+
+async def run(args: dict[str, str], ctx: CommandContext) -> CommandResult:
+    """
+    args  → validated, sanitized arguments from commands.yaml schema
+    ctx   → controlled context object (see below)
+    """
+    url = args["url"]
+
+    # --- user writes their logic here ---
+    audio_path = await download_audio(url)
+    # ------------------------------------
+
+    return CommandResult.success(
+        message=f"Audio downloaded: {audio_path}",
+        payload={"file": audio_path}
+    )
+```
+
+**`CommandContext` gives the handler access to — and ONLY to:**
+
+| `ctx` attribute | What it provides |
+|---|---|
+| `ctx.send_message(to, content)` | Sends a reply via the platform adapter |
+| `ctx.user` | The `User` object who sent the command |
+| `ctx.platform` | Platform name string (`"whatsapp"`) |
+| `ctx.get_api_key(service_name)` | Retrieves decrypted API key from DB (never exposes key in logs) |
+| `ctx.logger` | Structured logger scoped to this execution |
+
+**`CommandContext` explicitly does NOT expose:**
+- Raw DB session
+- Other plugins
+- Core internals
+- File system write access outside plugin's own temp dir
+
+**`CommandResult`** is a typed return value — not a raw string.  
+The Core reads `CommandResult.success` / `CommandResult.error` and routes the response
+through the adapter. Handlers never call `send_message` themselves — they return a result
+and the Core sends it. This keeps adapters cleanly separated from handler logic.
+
+---
+
+### Loading Flow (How Core Processes a Plugin)
+
+```
+Core boots
+  → PluginLoader scans plugins/ directory
+  → For each plugin folder:
+      → Reads manifest.json                    # identity check
+      → Reads commands.yaml                    # builds routing table (NO Python import yet)
+      → Reads permissions.json                 # builds ACL table
+      → Validates all three schemas
+      → Registers in DB (plugins + tools tables)
+
+Incoming message: "!ytaudio https://youtube.com/..."
+  → CommandSanitizer.sanitize(raw)
+  → Parser matches pattern → "ytaudio" + args {"url": "..."}
+  → Router looks up "ytaudio" in DB routing table
+  → PermissionValidator checks user role vs permissions.json
+  → ApiWatchdog.is_dead("youtube_api") → False, proceed
+  → PluginExecutor:
+      → NOW imports handlers.ytaudio (lazy import — only on first call)
+      → Calls run(args, ctx)
+      → Wraps result in CommandResult
+  → Adapter sends reply
+  → Logger records execution
+```
+
+Key point: **Python handler files are imported lazily — only when the command is first called.**
+The loader never imports all handlers on boot. This means:
+- Fast startup regardless of plugin count
+- A broken handler in one plugin doesn't crash the core on boot
+- Handlers can be hot-reloaded (future)
+
+---
+
+### Plugin Structure (Final, Locked)
+
+```
+plugins/
+  <plugin_name>/
+    manifest.json       ← Identity (name, version, author, platform, min_core_version)
+    commands.yaml       ← Routing table (command → handler + arg schema + api_required flag)
+    permissions.json    ← Per-command ACL (roles, block list, rate limit)
+    handlers/
+      <command_name>.py ← One file per command (recommended) OR grouped files
+      ...
+```
+
+Multiple commands can share one handler file if they are tightly related.
+The routing is always through `commands.yaml` — file grouping is the plugin author's choice.
+
+---
+
+### Reference Plugin: `echo` (Smoke Test)
+
+```
+plugins/
+  echo/
+    manifest.json
+    commands.yaml
+    permissions.json
+    handlers/
+      echo.py
+```
+
+`commands.yaml`:
+```yaml
+commands:
+  echo:
+    description: "Echo back the input text"
+    pattern: "!echo <text>"
+    handler: "handlers.echo.run"
+    requires_api: false
+    args:
+      - name: text
+        type: str
+        required: true
+        description: "Text to echo back"
+```
+
+`handlers/echo.py`:
+```python
+from omnikernal.core.contracts import CommandContext, CommandResult
+
+async def run(args: dict[str, str], ctx: CommandContext) -> CommandResult:
+    return CommandResult.success(message=args["text"])
+```
+
+That's the entire plugin. Three files, ~20 lines total, zero boilerplate beyond the contract.
+
+---
+
+### What We Build in Phase 3
 
 | Item | Purpose |
 |---|---|
-| `src/plugins/loader.py` | Discovers and validates plugins from `plugins/` dir |
-| `src/plugins/registry.py` | In-memory plugin registry (backed by DB) |
-| `src/plugins/validator.py` | Validates manifest.json and permissions.json schema |
-| `plugins/echo/` | First real plugin — `!echo <text>` — used as smoke test |
+| `src/plugins/loader.py` | Scans `plugins/` dir, reads YAML/JSON, registers in DB |
+| `src/plugins/registry.py` | In-memory routing table (command → handler path + meta) |
+| `src/plugins/validator.py` | Schema validation for `manifest.json`, `commands.yaml`, `permissions.json` |
+| `src/plugins/executor.py` | Lazy-imports handler, calls `run(args, ctx)`, wraps result |
+| `src/core/contracts/command_context.py` | `CommandContext` class — controlled capability surface |
+| `src/core/contracts/command_result.py` | `CommandResult` typed return value |
+| `plugins/echo/` | Reference plugin — full smoke test |
 
 ### Plugin Isolation Rules
-- Plugins run in their own execution scope
-- Plugins cannot directly call each other
-- Plugins cannot access the DB directly (only through Core)
+- Handlers are imported in an isolated scope — no global state leak between plugins
+- Handlers cannot import other plugin handlers directly
+- Handlers access the DB only through `ctx.get_api_key()` — no raw session
 
 ### What We Do NOT Build in Phase 3
+- Plugin hot-reload (future — lazy import makes it possible but not yet wired)
 - Plugin marketplace / remote registry
 - Cross-plugin messaging
-- Plugin versioning UI
+- Rate limiting enforcement (declared in `permissions.json`, enforced in Phase 2.5+)
 
 ### Exit Criteria
-- `!echo hello` works end-to-end through the Core engine with mock adapter
-- Plugin is registered in DB
-- Execution is logged
+- `!echo hello` → Core loads `plugins/echo/`, reads `commands.yaml`, lazy-imports `handlers/echo.py`, returns `"hello"` through mock adapter
+- Plugin is registered in DB (`plugins` + `tools` tables)
+- Execution is logged in `execution_logs`
+- A second plugin with a broken `handlers/bad.py` does NOT crash the Core on boot
+- Schema validation rejects a `commands.yaml` missing required fields
 
 ---
 
@@ -754,7 +1031,9 @@ OmniKernal/
 │   │   ├── message.py
 │   │   ├── user.py
 │   │   ├── plugin_manifest.py
-│   │   └── routing_rule.py
+│   │   ├── routing_rule.py
+│   │   ├── command_context.py ← CommandContext — safe capability surface for handlers
+│   │   └── command_result.py  ← CommandResult — typed handler return value
 │   ├── database/
 │   │   ├── models.py          ← All tables incl. api_health, dead_apis
 │   │   ├── session.py
@@ -771,9 +1050,10 @@ OmniKernal/
 │   │   ├── registry.py        ← AdapterRegistry (platform name → instance)
 │   │   └── validator.py       ← Validates adapter.yaml before loading
 │   ├── plugins/
-│   │   ├── loader.py
-│   │   ├── registry.py
-│   │   └── validator.py
+│   │   ├── loader.py          ← Scans plugins/, reads YAML/JSON, registers in DB
+│   │   ├── registry.py        ← In-memory routing table (command → handler path)
+│   │   ├── validator.py       ← Schema validation (manifest, commands.yaml, perms)
+│   │   └── executor.py        ← Lazy-imports handler, calls run(args, ctx)
 │   ├── profiles/
 │   │   ├── manager.py
 │   │   ├── metadata.py
@@ -783,10 +1063,12 @@ OmniKernal/
 │       ├── coop_mode.py
 │       └── mode_manager.py
 ├── plugins/
-│   └── echo/
-│       ├── manifest.json
-│       ├── commands.py
-│       └── permissions.json
+│   └── echo/                   ← Reference plugin (smoke test)
+│       ├── manifest.json       ← name, version, author, platform
+│       ├── commands.yaml       ← Routing table: !echo → handlers.echo.run
+│       ├── permissions.json    ← ACL: allowed_roles, rate_limit
+│       └── handlers/
+│           └── echo.py             ← async def run(args, ctx) → CommandResult
 ├── adapter_packs/
 │   └── whatsapp_playwright/    ← Reference Adapter Pack (SDK: Playwright)
 │       ├── adapter.yaml        ← Pack descriptor

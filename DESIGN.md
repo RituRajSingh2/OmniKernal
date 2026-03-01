@@ -1,8 +1,8 @@
 # OmniKernal — Phase Design Document
 
 > **Branch:** `design`  
-> **Date:** 2026-03-01  
-> **Status:** Draft — Pre-Implementation  
+> **Date:** 2026-03-01 (last reviewed 2026-03-01)  
+> **Status:** Active — Architecture Locked, Implementation Pending  
 > **Author:** BITS-Rohit
 
 ---
@@ -53,7 +53,7 @@ Lay the skeleton. Define interfaces before any implementation. Write zero logic 
 |---|---|
 | `pyproject.toml` | uv-managed deps, build config, tooling |
 | `src/__init__.py` | Package root |
-| `src/core/interfaces/` | Abstract base classes — `PlatformAdapter`, `BasePlugin`, `BaseCommand`, `BaseSession` |
+| `src/core/interfaces/` | Abstract base classes — `PlatformAdapter`, `BasePlugin`, `BaseCommand` |
 | `src/core/contracts/` | Dataclasses / TypedDicts for `Message`, `User`, `PluginManifest`, `RoutingRule` |
 | `tests/` scaffold | Empty test stubs for every interface |
 | `DESIGN.md` (this file) | Architecture decision record |
@@ -88,30 +88,63 @@ Build the beating heart. The Core must be **100% platform-agnostic** — it must
 | `src/core/logger.py` | Secure structured logging (Loguru wrapper) |
 | `src/core/loader.py` | Plugin discovery & dynamic loading |
 
-### Core Flow (from Blueprint)
+### Core Flow (Revised — Hook Contract Model)
+
+The Core does NOT initiate WhatsApp or any platform directly.  
+It calls **the user's implementations** of a defined interface contract.  
+The platform adapter is user-provided code. The Core only calls it through the ABC.
+
 ```
-Incoming Message
-  → Parser (pattern match)
-  → Router (tool detection)
-  → Permission Validator (ACL check)
-  → Plugin Executor (isolated call)
-  → Logger (structured log)
-  → Response Return
+── Boot ──────────────────────────────────────────────────────────────────
+Core.start(adapter)
+  → adapter.connect()            ← User's code: starts browser / socket / API
+
+── Poll Loop ─────────────────────────────────────────────────────────────
+while running:
+  messages = await adapter.fetch_new_messages()   ← User's code: reads DOM / socket
+  for msg in messages:
+
+    → CommandSanitizer.sanitize(msg.raw_text)
+    → Parser.match(sanitized)    → command_name + args
+    → Router.lookup(command_name) in DB routing table
+    → PermissionValidator.check(user, command)
+    → ApiWatchdog.is_dead(api_url) → block if dead
+
+    → PluginExecutor.run(handler, args, ctx)
+        → lazy-import handler file
+        → call handler.run(args, ctx)
+        → return CommandResult
+
+    → if CommandResult.reply:
+        await adapter.send_message(msg.user.id, CommandResult.reply)
+                                   ← User's code: types + clicks Send
+
+    → Logger.log_execution(msg, CommandResult)
+
+── Shutdown ──────────────────────────────────────────────────────────────
+  → adapter.disconnect()         ← User's code: closes browser / disconnects socket
 ```
 
+**What the Core owns:** sanitize, route, permission check, watchdog, execute, log, pipe reply.  
+**What the user's adapter owns:** connect, read messages, send messages, disconnect.  
+**The Core never calls `playwright`, `baileys`, or any SDK.** Ever.
+
 ### Hard Rules for Core
-- **No import of `playwright`, `sqlalchemy` at the top level**
-- **All platform interaction MUST go through `PlatformAdapter`**
-- **All plugin interaction MUST go through `BasePlugin`**
+- **No import of any platform SDK at the top level** — ever
+- **All platform interaction MUST go through `PlatformAdapter` interface methods**
+- **All plugin interaction MUST go through `BasePlugin` + executor**
+- **Handlers do NOT call `send_message` themselves** — they return `CommandResult.reply` and the Core pipes it through the adapter
 
 ### What We Do NOT Build in Phase 1
 - Real database queries (mock/stub stubs only)
 - Real plugin implementations
-- Real platform adapters
+- Real platform adapters (those are Phase 4)
 
 ### Exit Criteria
-- Core engine boots, receives a mock `Message`, dispatches, routes, and returns a mock response
-- Unit tests cover: parser, router, permissions
+- Core boots with a **mock adapter** that implements the ABC with in-memory stubs
+- Mock `fetch_new_messages()` returns a hardcoded message
+- Full loop runs: sanitize → route → execute → `send_message` called on mock adapter
+- Unit tests cover: parser, router, permissions, the poll loop itself
 
 ---
 
@@ -535,40 +568,50 @@ from omnikernal.core.contracts import CommandContext, CommandResult
 async def run(args: dict[str, str], ctx: CommandContext) -> CommandResult:
     """
     args  → validated, sanitized arguments from commands.yaml schema
-    ctx   → controlled context object (see below)
+    ctx   → safe, Core-provided context object
     """
     url = args["url"]
+    api_key = await ctx.get_api_key("youtube")   # decrypted by Core, logged safely
 
-    # --- user writes their logic here ---
-    audio_path = await download_audio(url)
-    # ------------------------------------
+    # --- user writes their logic here using any lib/SDK they want ---
+    audio_path = await download_audio(url, api_key=api_key)
+    # ----------------------------------------------------------------
 
-    return CommandResult.success(
-        message=f"Audio downloaded: {audio_path}",
-        payload={"file": audio_path}
-    )
+    # Return a reply string — Core will pipe this through adapter.send_message()
+    return CommandResult.success(reply=f"✅ Audio ready: {audio_path}")
+
+    # Or, if nothing to reply:
+    return CommandResult.success(reply=None)
+
+    # Or, on failure:
+    return CommandResult.error(reason="YouTube API unreachable")
 ```
 
-**`CommandContext` gives the handler access to — and ONLY to:**
+**`CommandContext` gives the handler — and ONLY these:**
 
-| `ctx` attribute | What it provides |
-|---|---|
-| `ctx.send_message(to, content)` | Sends a reply via the platform adapter |
-| `ctx.user` | The `User` object who sent the command |
-| `ctx.platform` | Platform name string (`"whatsapp"`) |
-| `ctx.get_api_key(service_name)` | Retrieves decrypted API key from DB (never exposes key in logs) |
-| `ctx.logger` | Structured logger scoped to this execution |
+| `ctx.` | What it provides | Why Core owns it |
+|---|---|---|
+| `ctx.user` | The `User` who sent the command | Core parsed this from the adapter message |
+| `ctx.get_api_key(service)` | Decrypted API key from DB | Only Core can decrypt — never logged |
+| `ctx.logger` | Structured logger scoped to this execution | Core writes to `execution_logs` |
 
-**`CommandContext` explicitly does NOT expose:**
+**`CommandContext` does NOT expose (removed after discussion):**
+- ~~`ctx.send_message()`~~ — **removed.** Handler returns `CommandResult.reply`. Core sends it via `adapter.send_message()`. Handler never touches the adapter directly.
+- ~~`ctx.platform`~~ — Handler is written by the same person who wrote the adapter. They know their platform.
 - Raw DB session
 - Other plugins
 - Core internals
-- File system write access outside plugin's own temp dir
 
-**`CommandResult`** is a typed return value — not a raw string.  
-The Core reads `CommandResult.success` / `CommandResult.error` and routes the response
-through the adapter. Handlers never call `send_message` themselves — they return a result
-and the Core sends it. This keeps adapters cleanly separated from handler logic.
+**`CommandResult` — what the Core reads from every handler:**
+
+```python
+CommandResult.success(reply="message text")  # Core calls adapter.send_message() with this
+CommandResult.success(reply=None)            # No reply needed — Core skips send
+CommandResult.error(reason="why it failed") # Core logs failure, triggers ApiWatchdog
+```
+
+`CommandResult` is an **audit + routing signal**, not a response delivery object.  
+The actual delivery goes: `CommandResult.reply → Core → adapter.send_message() → user's SDK code → platform`.
 
 ---
 
@@ -584,18 +627,20 @@ Core boots
       → Validates all three schemas
       → Registers in DB (plugins + tools tables)
 
-Incoming message: "!ytaudio https://youtube.com/..."
-  → CommandSanitizer.sanitize(raw)
-  → Parser matches pattern → "ytaudio" + args {"url": "..."}
-  → Router looks up "ytaudio" in DB routing table
+Incoming message fed by adapter.fetch_new_messages(): "!ytaudio https://youtube.com/..."
+  → CommandSanitizer.sanitize(raw_text)
+  → Parser matches pattern → command="ytaudio", args={"url": "..."}
+  → Router looks up "ytaudio" in DB routing table → finds handler path
   → PermissionValidator checks user role vs permissions.json
   → ApiWatchdog.is_dead("youtube_api") → False, proceed
   → PluginExecutor:
-      → NOW imports handlers.ytaudio (lazy import — only on first call)
-      → Calls run(args, ctx)
-      → Wraps result in CommandResult
-  → Adapter sends reply
-  → Logger records execution
+      → lazy-imports handlers.ytaudio (only on first call)
+      → calls run(args={"url": "..."}, ctx=CommandContext(user, logger, get_api_key))
+      → handler runs user's logic, returns CommandResult(reply="✅ Audio ready")
+  → if CommandResult.reply:
+      await adapter.send_message(msg.user.id, "✅ Audio ready")
+      ↑ Core calls this — user's adapter code types + clicks Send in WhatsApp
+  → Logger.log_execution(command, user, result, timestamp)
 ```
 
 Key point: **Python handler files are imported lazily — only when the command is first called.**
@@ -695,31 +740,79 @@ That's the entire plugin. Three files, ~20 lines total, zero boilerplate beyond 
 
 ---
 
-## 7. Phase 4 — Platform Adapter Layer (SDK-Agnostic Adapter Pack System)
+## 7. Phase 4 — Platform Adapter Layer (Hook Contract System)
 
-### The Problem with a Playwright-First Design
+### The Core Insight from Architecture Discussion
 
-If Phase 4 is written as *"build a Playwright adapter"*, we have accidentally introduced a hidden
-coupling. The Core would implicitly assume browser-based DOM automation. Adding Baileys later
-would require rewriting assumptions, not just adding a new folder.
+The Core does not know what WhatsApp is. It does not start a browser. It does not read a DOM.
 
-The fix: **Adapters are Packs, not implementations baked into the Core.**
+But it still needs to:
+1. Get new messages from *somewhere*
+2. Send replies to *somewhere*
+3. Know when to start and stop
+
+The answer: **The Core defines a hook contract (ABC). The user implements it. The Core calls it.**
+
+This is not coupling — the Core only calls 4 abstract method names. It never sees the SDK.  
+The user owns all platform-specific code. The Core owns lifecycle management.
 
 ---
 
-### The Adapter Pack Model
+### The Adapter Pack — What It Actually Is
 
-An **Adapter Pack** is a self-contained folder that any SDK author can write.  
-The Core discovers it, validates it, and calls it — **without knowing what SDK is inside**.
+An **Adapter Pack** is a folder of **user-written Python files that implement the Core's hook contract.**  
+The Core discovers the pack, validates the descriptor (`adapter.yaml`), loads the implementation class, and calls it through the ABC interface.
 
-The pack author provides:
-- A descriptor file (`adapter.yaml`) declaring what this pack is and what it can do
-- Python implementation files that use the native SDK to fulfil the Core's interface contract
+The Core provides: **the contract (4 methods)**  
+The user provides: **the implementation (whatever SDK they want)**  
+The Core calls: **only the 4 abstract method names. Never anything SDK-specific.**
 
-The Core provides:
-- The `PlatformAdapter` ABC — the contract every pack must honour
-- The `AdapterLoader` — discovers, validates, and dynamically loads packs
-- The `AdapterRegistry` — maps platform names to loaded adapter instances
+---
+
+### Core Interface Contract (PlatformAdapter ABC)
+
+Defined in Phase 0. Locked here. Every adapter pack must implement this exactly:
+
+```python
+class PlatformAdapter(ABC):
+    """Hook contract. Core calls these. User implements them."""
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Start your session — open browser, connect socket, call auth API.
+        Core calls this on boot. Your code runs whatever SDK you're using."""
+        ...
+
+    @abstractmethod
+    async def fetch_new_messages(self) -> list[Message]:
+        """Return new unread messages since last call.
+        Core calls this in a polling loop. Your code reads DOM, polls socket, hits endpoint.
+        Return empty list if no new messages — never block indefinitely."""
+        ...
+
+    @abstractmethod
+    async def send_message(self, to: str, content: str) -> None:
+        """Send a reply to a user.
+        Core calls this when a handler returns CommandResult.reply.
+        Your code clicks Send button, emits to socket, POSTs to API — whatever your SDK does."""
+        ...
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """Tear down the session cleanly.
+        Core calls this on shutdown."""
+        ...
+
+    @property
+    @abstractmethod
+    def platform_name(self) -> str:
+        """Return your platform identifier, e.g. 'whatsapp', 'telegram'."""
+        ...
+```
+
+> **`fetch_new_messages` not `receive_message`** — the method returns a list, not a single
+> message. The Core iterates the list. This allows the adapter to batch-return messages from
+> a polling window rather than blocking on one at a time.
 
 ---
 
@@ -728,87 +821,105 @@ The Core provides:
 ```
 adapter_packs/
   <pack_name>/
-    adapter.yaml          ← Descriptor: name, platform, sdk, version, capabilities
-    session.py            ← Implements: session lifecycle (connect, disconnect, status)
-    sender.py             ← Implements: send_message(to, content, media?)
-    receiver.py           ← Implements: receive_message() -> Message  (polling or webhook)
-    user.py               ← Implements: get_user(user_id) -> User
-    requirements.txt      ← SDK-specific pip deps (optional, uv reads this at load time)
+    adapter.yaml          ← Descriptor: name, platform, sdk, version
+    adapter.py            ← The implementation class (implements PlatformAdapter)
+    requirements.txt      ← SDK-specific deps (optional)
 ```
 
-**`adapter.yaml` format:**
+The implementation class can internally split into helper files as the author prefers.  
+The Core only needs `adapter.py` to contain the class named in `adapter.yaml`.
+
+**`adapter.yaml`:**
 ```yaml
 name: whatsapp-playwright
 platform: whatsapp
 sdk: playwright
 version: "1.0.0"
 author: BITS-Rohit
+entry_class: adapter.WhatsAppPlaywrightAdapter   # module.ClassName
 capabilities:
   - send_text
   - receive_text
   - send_media
-  - receive_media
-entry_points:
-  session:  session.py::PlaywrightSession
-  sender:   sender.py::PlaywrightSender
-  receiver: receiver.py::PlaywrightReceiver
-  user:     user.py::PlaywrightUserResolver
 ```
 
 ---
 
-### How the Core Interacts with an Adapter Pack
-
-```
-Core boots
-  → AdapterLoader scans adapter_packs/
-  → Reads adapter.yaml for each pack
-  → Validates schema (capabilities, entry_points)
-  → Dynamically imports the .py entry points
-  → Wraps them in the PlatformAdapter interface
-  → Registers in AdapterRegistry
-
-Core receives a routing decision:
-  → Looks up AdapterRegistry by platform name
-  → Calls adapter.send_message(to, content)
-  → Adapter pack calls its native SDK internally
-  → Core never sees SDK-specific code
-```
-
-The Core calls **only** the `PlatformAdapter` contract interface. It never calls `playwright`,
-`baileys`, or any SDK directly.
-
----
-
-### Core Interface Contract (defined in Phase 0, locked here)
+### What the User Writes (Reference: Playwright/WhatsApp)
 
 ```python
-class PlatformAdapter(ABC):
-    """Every adapter pack must satisfy this contract."""
+# adapter_packs/whatsapp_playwright/adapter.py
+from playwright.async_api import async_playwright
+from omnikernal.core.interfaces import PlatformAdapter
+from omnikernal.core.contracts import Message, User
 
-    @abstractmethod
-    async def connect(self) -> None: ...
+class WhatsAppPlaywrightAdapter(PlatformAdapter):
 
-    @abstractmethod
-    async def disconnect(self) -> None: ...
+    async def connect(self) -> None:
+        # User's code — starts Playwright, opens WhatsApp Web, authenticates
+        self._pw = await async_playwright().start()
+        self._browser = await self._pw.chromium.launch(headless=False)
+        self._page = await self._browser.new_page()
+        await self._page.goto("https://web.whatsapp.com")
+        # ... wait for QR scan, session ready ...
 
-    @abstractmethod
-    async def send_message(self, to: str, content: str) -> None: ...
+    async def fetch_new_messages(self) -> list[Message]:
+        # User's code — reads DOM for unread message elements
+        raw = await self._page.query_selector_all(".unread-message")
+        return [self._parse(el) for el in raw]
 
-    @abstractmethod
-    async def receive_message(self) -> Message: ...
+    async def send_message(self, to: str, content: str) -> None:
+        # User's code — finds chat, types message, clicks Send
+        await self._page.click(f'[data-contact="{to}"]')
+        await self._page.fill(".message-input", content)
+        await self._page.keyboard.press("Enter")
 
-    @abstractmethod
-    async def get_user(self, user_id: str) -> User: ...
+    async def disconnect(self) -> None:
+        await self._browser.close()
+        await self._pw.stop()
 
     @property
-    @abstractmethod
-    def platform_name(self) -> str: ...
-
-    @property
-    @abstractmethod
-    def capabilities(self) -> list[str]: ...
+    def platform_name(self) -> str:
+        return "whatsapp"
 ```
+
+The Core called `connect()`, `fetch_new_messages()`, `send_message()`, `disconnect()`.  
+**The Core had zero knowledge of Playwright, DOM, or WhatsApp.**
+
+---
+
+### How the Core Interacts with the Adapter
+
+```
+Core.start(adapter=WhatsAppPlaywrightAdapter())
+  → adapter.connect()                  ← user's code boots the session
+
+while running:
+  messages = await adapter.fetch_new_messages()   ← user's code reads messages
+  for msg in messages:
+      result = await self.process(msg)            ← Core's routing pipeline
+      if result.reply:
+          await adapter.send_message(msg.user.id, result.reply)  ← user's code sends
+
+await adapter.disconnect()             ← user's code tears down
+```
+
+---
+
+### v1 Limitation — Single Adapter at Boot
+
+> **v1 supports exactly one adapter at a time.**  
+> The Core is instantiated with one `PlatformAdapter` object passed at startup.
+
+This is an intentional simplification for Phase 4. It means:
+- One WhatsApp session at a time
+- No simultaneous Playwright + Baileys
+- No runtime adapter switching
+
+This is **acceptable for the initial build.** Multi-adapter concurrency is Phase 8 (Future Ideas).
+
+The ABC contract is already designed for multi-adapter — adding it later is an `AdapterRegistry`
+change in the Core, not a change to the ABC or any adapter pack.
 
 ---
 
@@ -816,44 +927,25 @@ class PlatformAdapter(ABC):
 
 | Item | Purpose |
 |---|---|
-| `src/adapters/loader.py` | `AdapterLoader` — discovers and validates adapter packs |
-| `src/adapters/registry.py` | `AdapterRegistry` — maps platform names → loaded adapters |
-| `src/adapters/validator.py` | Validates `adapter.yaml` schema before loading |
-| `adapter_packs/whatsapp_playwright/` | **First reference pack** — Playwright/WhatsApp Web |
+| `src/adapters/loader.py` | `AdapterLoader` — finds pack by `adapter.yaml`, imports the entry class |
+| `src/adapters/validator.py` | Validates `adapter.yaml` schema and that the class implements all ABC methods |
 | `adapter_packs/whatsapp_playwright/adapter.yaml` | Pack descriptor |
-| `adapter_packs/whatsapp_playwright/session.py` | Browser session via Playwright |
-| `adapter_packs/whatsapp_playwright/sender.py` | DOM-based message sending |
-| `adapter_packs/whatsapp_playwright/receiver.py` | DOM polling for incoming messages |
-| `adapter_packs/whatsapp_playwright/user.py` | WhatsApp contact resolution |
-
-The Playwright pack is built **only as a reference implementation** — to prove the
-Adapters Pack system actually works. It does not set any Core constraints.
-
----
-
-### Adding a New SDK Later (e.g. Baileys)
-
-A Baileys adapter author would:
-1. Create `adapter_packs/whatsapp_baileys/`
-2. Write `adapter.yaml` declaring `sdk: baileys`
-3. Write `sender.py`, `receiver.py`, `session.py`, `user.py` using Baileys native APIs
-4. Drop the folder — **no Core changes needed, zero.**
-
-The Core loads it identically to the Playwright pack.
-
----
+| `adapter_packs/whatsapp_playwright/adapter.py` | Full `WhatsAppPlaywrightAdapter` implementation |
 
 ### What We Do NOT Build in Phase 4
-- Baileys pack (any community contributor can add it — but we don't block on it)
-- Business API pack (different model — Phase 8)
-- Multi-adapter concurrency (running two adapters simultaneously — Phase 8)
+- Baileys pack (ABC makes it trivial to add — defer to community or Phase 8)
+- Multi-adapter registry (Phase 8 — Future Ideas)
+- Business API pack (Phase 8)
+- Webhook-based receive (adapter.yaml can declare `receive_mode: webhook` — future)
 
 ### Exit Criteria
-- `AdapterLoader` discovers `adapter_packs/whatsapp_playwright/` and loads it cleanly
-- `AdapterRegistry` returns the correct adapter for `platform="whatsapp"`
-- Core sends `!echo hello` through the adapter → Playwright sends the reply in WhatsApp Web
-- A **second mock adapter** (in-memory, no SDK) passes the same test — proving the system is
-  not Playwright-coupled
+- `AdapterLoader` validates and loads `adapter_packs/whatsapp_playwright/adapter.yaml`
+- Core calls `connect()` → Playwright browser opens, WhatsApp Web loads
+- Core calls `fetch_new_messages()` → at least one Message returned from DOM
+- Handler runs, returns `CommandResult.reply`
+- Core calls `send_message()` → reply appears in WhatsApp
+- A **second mock adapter** (in-memory stubs, no Playwright) passes the same full loop test  
+  proving the Core is not Playwright-coupled
 
 ---
 
@@ -904,16 +996,33 @@ Wire up the two primary execution modes.
 
 | Module | Purpose |
 |---|---|
-| `src/modes/self_mode.py` | Autonomous polling + execution loop |
-| `src/modes/coop_mode.py` | Human-in-the-loop trigger system |
-| `src/modes/mode_manager.py` | Mode selection and lifecycle |
+| `src/modes/self_mode.py` | Autonomous polling loop — calls `adapter.fetch_new_messages()` on interval |
+| `src/modes/coop_mode.py` | Human-in-the-loop — only executes commands on explicit approval |
+| `src/modes/mode_manager.py` | Mode selection, lifecycle, graceful shutdown |
+
+**Self Mode inner loop:**
+```python
+# self_mode.py — simplified
+async def run(core: OmniKernal, adapter: PlatformAdapter, poll_interval: float = 1.0):
+    await adapter.connect()
+    while core.is_running:
+        messages = await adapter.fetch_new_messages()
+        for msg in messages:
+            await core.process(msg, adapter)
+        await asyncio.sleep(poll_interval)
+    await adapter.disconnect()
+```
+
+The `core.process(msg, adapter)` method runs the full pipeline:  
+sanitize → route → permission → watchdog → execute handler → send reply via adapter.
 
 ### What We Do NOT Build in Phase 6
-- Business Mode (API-based, no UI) — **Phase 8**
+- Business Mode (API-based, no UI) — **Future Ideas**
+- Configurable poll interval per adapter — **Future Ideas**
 
 ### Exit Criteria
-- Self mode runs a full loop: receive → parse → route → execute → reply
-- Co-op mode correctly waits for human trigger before executing
+- Self mode runs a full loop: `fetch_new_messages` → sanitize → route → execute → `send_message`
+- Co-op mode correctly holds execution, waits for human confirmation, then routes
 
 ---
 
@@ -948,21 +1057,41 @@ Validate the architecture against the research performance targets from the Blue
 
 ---
 
-## 11. Phase 8 — Future Enhancements (Explicitly Deferred)
+## 11. Future Ideas (Explicitly Deferred)
 
-> ⚠️ **These are NOT on the near-term roadmap.** They are listed here so we don't accidentally build them early and create premature complexity.
+> ⚠️ **These are NOT on the near-term roadmap.**  
+> They are listed here so we don't accidentally build them early.  
+> The current architecture is already designed to support most of these — they are deferred for simplicity, not impossibility.
 
-| Feature | Reason Deferred |
-|---|---|
-| **Baileys Adapter Pack** | Adapter Pack system must be stable first (Phase 4). Then any contributor can add it independently. |
-| **Business API Adapter Pack** | Different execution model (no UI, pure API). Own phase post-Phase 6. |
-| **Business Mode** | Requires API infra separate from browser automation. |
-| **Multi-adapter concurrency** | Running Playwright + Baileys simultaneously — needs Phase 5 profile isolation first. |
-| **Redis async queue** | Only justified at 50+ concurrent users. |
-| **Distributed plugin registry** | Single-node sufficient for Phase 3-6. |
-| **Cross-process session coordination** | Complexity not justified until multi-server scale. |
-| **Horizontal scaling layer** | Research validation first. |
-| **Plugin marketplace** | Ecosystem play — post v1.0. |
+### Adapter Layer — Future
+
+| Idea | Why Deferred | How to Add When Ready |
+|---|---|---|
+| **Baileys Adapter Pack** | Phase 4 ABC must be stable first. Community can add independently. | New `adapter_packs/whatsapp_baileys/` folder + `adapter.py` implementing the same ABC. No Core changes. |
+| **Multi-Adapter Registry** | v1 is single-adapter. Phase 5 profile isolation needed first. | Replace single `adapter` arg with `AdapterRegistry`. Core picks adapter by `platform_name`. |
+| **Push/Enqueue Model** | Alternative to polling — adapter calls `core.enqueue(user, raw_text)` instead of Core polling `fetch_new_messages()`. More event-driven. Better for webhooks (e.g. Business API). | Expose `Core.enqueue()` public method. Adapter calls it from its own event listener. Core processes queue async. |
+| **Webhook-based Receive** | Polling works for Playwright/Baileys. Webhooks needed for Business API. | `adapter.yaml` declares `receive_mode: webhook`. `AdapterLoader` wires up a FastAPI route. Core receives via `enqueue()`. |
+| **Business API Adapter Pack** | Different execution model — no browser, pure HTTP. Needs webhook receive. | New adapter pack + webhook mode. No Core changes. |
+| **Business Mode** | Requires Business API adapter + webhook server running. | Phase after Baileys and webhook support are stable. |
+
+### Plugin Layer — Future
+
+| Idea | Why Deferred | How to Add When Ready |
+|---|---|---|
+| **Plugin Hot-Reload** | Lazy import makes this possible — just clear the module from `sys.modules` and re-import. | Add `PluginExecutor.reload(plugin_name)` triggered by a `!reload <plugin>` admin command. |
+| **Cross-Plugin Messaging** | Adds complexity without a clear v1 use case. | Define a `PluginBus` in Core — plugins post events, other plugins subscribe. Core mediates. |
+| **Remote Plugin Registry / Marketplace** | Single-node registry sufficient through Phase 7. | Add a `registry.yaml` URL in `manifest.json`. `PluginLoader` fetches and verifies remote plugins. |
+| **Rate Limiting Enforcement** | Declared in `permissions.json` from Phase 3 — enforcement deferred. | Add `RateLimiter` in Core using `execution_logs` timestamps. Enforced before `PluginExecutor`. |
+
+### Infrastructure — Future
+
+| Idea | Why Deferred | How to Add When Ready |
+|---|---|---|
+| **Redis Async Queue** | Only justified at 50+ concurrent users. SQLite handles single-node fine. | Replace in-memory execution queue with Redis streams. Core processes remain identical. |
+| **Distributed Plugin Registry** | Single-node sufficient through Phase 7. | Postgres-backed registry + service discovery layer. |
+| **Cross-Process Session Coordination** | One process per profile is sufficient for Phase 5-7. | Shared Redis lock instead of file-based lock. Core lock API unchanged. |
+| **Horizontal Scaling** | Research validation (Phase 7) must justify it first. | Stateless Core behind a load balancer. DB is the shared state. |
+| **Admin CLI** | Useful but not blocking. | `uv run omnikernal admin` — wraps `ApiHealthRepo.reactivate()`, plugin reload, status checks. |
 
 ---
 
@@ -979,7 +1108,7 @@ Validate the architecture against the research performance targets from the Blue
 | **Phase 5** | Profile Management + Lock files | 🟡 Medium |
 | **Phase 6** | Self Mode + Co-op Mode | 🟡 Medium |
 | **Phase 7** | Performance Benchmarking & Research | 🟢 Post-core |
-| **Phase 8** | Baileys, Business API, Redis, Marketplace | ⚪ Deferred |
+| **Phase 8** | Future Ideas (Baileys, Multi-Adapter, Push Model, Marketplace) | ⚪ Deferred |
 
 ---
 
@@ -987,19 +1116,30 @@ Validate the architecture against the research performance targets from the Blue
 
 These rules must hold at every phase. Any PR that violates them should be rejected.
 
-1. **The Core Engine never imports a platform SDK directly.** All platform interaction flows through `PlatformAdapter`.
-2. **The Core Engine never imports a plugin directly.** All plugin interaction flows through `BasePlugin` + the loader.
-3. **An Adapter Pack is the only place where SDK-specific code lives.** No SDK import (`playwright`, `baileys`, etc.) may appear anywhere outside an `adapter_packs/<name>/` folder.
-4. **The Core validates an Adapter Pack via `adapter.yaml` before loading it.** No blind dynamic imports.
-5. **Plugins cannot talk to each other.** All cross-plugin communication (if ever needed) goes through Core.
-6. **The Database is the single source of truth.** No file-based plugin/tool detection in production.
-7. **Every execution is logged.** No silent failures.
-8. **Profile isolation is enforced at the OS level.** Separate dirs, separate lock files, separate PIDs.
-9. **Headless mode is automatic at >= 2 active profiles.**
-10. **API keys are never stored in plaintext.** DB column `tool_requirements.api_key_value` holds only Fernet ciphertext. Decryption happens in plugin scope only — never in the Core, never in logs.
-11. **No raw SQL strings outside `repository.py`.** All DB queries use SQLAlchemy ORM or `bindparams`. Enforced by lint rule.
-12. **All user-facing input passes through `CommandSanitizer` before parsing.** No raw message text ever reaches the router.
-13. **Dead API threshold is 3 consecutive errors.** Crossing it automatically quarantines the API and disables the dependent tool. No silent degradation.
+**Platform Adapter:**
+1. **The Core never imports a platform SDK.** All platform interaction flows through `PlatformAdapter` ABC methods only.
+2. **An Adapter Pack is the only place where SDK-specific code lives.** No `playwright`, `baileys`, or any SDK import may appear anywhere outside `adapter_packs/<name>/`.
+3. **The Core validates `adapter.yaml` before loading any pack.** No blind dynamic imports.
+4. **Handlers never call `send_message` directly.** They return `CommandResult.reply`. The Core pipes it through `adapter.send_message()`. Adapters stay decoupled from handler logic.
+5. **v1 supports one adapter at boot.** Multi-adapter is a Future Idea — do not pre-build it.
+
+**Plugin Layer:**
+6. **The Core never imports a plugin's Python files to discover commands.** Discovery is YAML-only. Handler files are lazy-imported only on first execution.
+7. **The Core never imports a plugin directly.** All plugin interaction flows through the loader + executor.
+8. **Plugins cannot talk to each other.** No cross-plugin imports. No direct calls between handlers.
+9. **Handlers access the DB only through `ctx.get_api_key()`.** No raw DB session in handler scope.
+
+**Database & Security:**
+10. **The Database is the single source of truth.** No file-based plugin/tool detection in production.
+11. **No raw SQL strings outside `repository.py`.** All queries via SQLAlchemy ORM or `bindparams`. Enforced by lint rule + tests.
+12. **All user-facing input passes through `CommandSanitizer` before parsing.** No raw message text reaches the router.
+13. **API keys are never stored in plaintext.** Only Fernet ciphertext in DB. Decryption in Core scope only — never logged.
+14. **Dead API threshold = 3 consecutive errors.** Quarantine is automatic. Reactivation is manual. No silent degradation.
+
+**General:**
+15. **Every execution is logged.** No silent failures.
+16. **Profile isolation is OS-level.** Separate dirs, lock files, PIDs.
+17. **Headless mode is automatic at ≥ 2 active profiles.**
 
 ---
 
@@ -1046,9 +1186,8 @@ OmniKernal/
 │   │   ├── sanitizer.py       ← CommandSanitizer + SqlSanitizer
 │   │   └── watchdog.py        ← ApiWatchdog (dead API tracking)
 │   ├── adapters/
-│   │   ├── loader.py          ← AdapterLoader (discovers adapter_packs/)
-│   │   ├── registry.py        ← AdapterRegistry (platform name → instance)
-│   │   └── validator.py       ← Validates adapter.yaml before loading
+│   │   ├── loader.py          ← AdapterLoader (loads pack from adapter.yaml)
+│   │   └── validator.py       ← Validates adapter.yaml + checks ABC compliance
 │   ├── plugins/
 │   │   ├── loader.py          ← Scans plugins/, reads YAML/JSON, registers in DB
 │   │   ├── registry.py        ← In-memory routing table (command → handler path)
@@ -1070,12 +1209,9 @@ OmniKernal/
 │       └── handlers/
 │           └── echo.py             ← async def run(args, ctx) → CommandResult
 ├── adapter_packs/
-│   └── whatsapp_playwright/    ← Reference Adapter Pack (SDK: Playwright)
-│       ├── adapter.yaml        ← Pack descriptor
-│       ├── session.py          ← connect() / disconnect()
-│       ├── sender.py           ← send_message()
-│       ├── receiver.py         ← receive_message()
-│       └── user.py             ← get_user()
+│   └── whatsapp_playwright/    ← Reference Pack (SDK: Playwright)
+│       ├── adapter.yaml        ← name, platform, sdk, entry_class
+│       └── adapter.py          ← WhatsAppPlaywrightAdapter(PlatformAdapter)
 ├── tests/
 │   ├── test_core/
 │   ├── test_database/

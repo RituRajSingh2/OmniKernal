@@ -43,7 +43,12 @@ class EventDispatcher:
             module = importlib.import_module(module_path)
             handler_func = getattr(module, func_name)
             
-            ctx = CommandContext(user=user, logger=self.logger)
+            ctx = CommandContext(
+                user=user, 
+                logger=self.logger,
+                _repository=self.repository,
+                _tool_id=route.id
+            )
             result = await handler_func(args, ctx)
             return result
         except Exception as e:

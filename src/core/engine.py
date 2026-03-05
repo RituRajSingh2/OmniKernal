@@ -1,6 +1,6 @@
 import asyncio
 from typing import TYPE_CHECKING
-from datetime import datetime
+from datetime import datetime, timezone
 from src.core.logger import core_logger
 from src.security.sanitizer import CommandSanitizer
 from src.core.dispatcher import EventDispatcher
@@ -93,9 +93,9 @@ class OmniKernal:
             return
 
         # 2. Dispatch & Execute
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         result = await self.dispatcher.dispatch(clean_text, msg.user)
-        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
         
         # 3. Log Execution to DB
         if result:

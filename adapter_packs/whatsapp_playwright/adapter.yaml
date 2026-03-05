@@ -1,0 +1,10 @@
+name: whatsapp-playwright
+platform: whatsapp
+sdk: playwright
+version: "1.0.0"
+author: BITS-Rohit
+entry_class: adapter.WhatsAppPlaywrightAdapter
+capabilities:
+  - send_text
+  - receive_text
+  - send_media

@@ -1,0 +1,9 @@
+name: console-mock
+platform: console
+sdk: none
+version: "1.0.0"
+author: OmniKernal Core
+entry_class: adapter.ConsoleMockAdapter
+capabilities:
+  - send_text
+  - receive_text

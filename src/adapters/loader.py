@@ -1,0 +1,100 @@
+"""
+AdapterLoader — Dynamic Adapter Pack Discovery & Loading
+
+Discovers adapter packs from the adapter_packs/ directory,
+validates their descriptor and class, and returns a ready-to-use
+PlatformAdapter instance.
+"""
+
+import os
+import importlib
+from typing import Optional
+from src.core.logger import core_logger
+from src.core.interfaces.platform_adapter import PlatformAdapter
+from src.adapters.validator import AdapterValidator
+
+
+class AdapterLoader:
+    """
+    Discovers and loads adapter packs from the adapter_packs/ directory.
+
+    Usage:
+        loader = AdapterLoader()
+        adapter = loader.load("console_mock")
+        # adapter is now a PlatformAdapter instance ready for Core
+    """
+
+    def __init__(self, packs_dir: str = "adapter_packs"):
+        self.packs_dir = packs_dir
+        self.validator = AdapterValidator()
+        self.logger = core_logger.bind(subsystem="adapter_loader")
+
+    def load(self, pack_name: str) -> PlatformAdapter:
+        """
+        Loads an adapter pack by name.
+
+        Steps:
+          1. Reads adapter_packs/<pack_name>/adapter.yaml
+          2. Validates the descriptor schema
+          3. Dynamically imports the entry_class
+          4. Validates ABC compliance
+          5. Returns an instance
+
+        Args:
+            pack_name: Name of the adapter pack folder.
+
+        Returns:
+            A PlatformAdapter instance ready for Core.
+
+        Raises:
+            FileNotFoundError: If the pack directory or descriptor is missing.
+            ValueError: If the descriptor is invalid.
+            TypeError: If the class doesn't implement PlatformAdapter.
+        """
+        pack_path = os.path.join(self.packs_dir, pack_name)
+
+        if not os.path.isdir(pack_path):
+            raise FileNotFoundError(f"Adapter pack not found: {pack_path}")
+
+        yaml_path = os.path.join(pack_path, "adapter.yaml")
+        if not os.path.exists(yaml_path):
+            raise FileNotFoundError(f"Missing adapter.yaml in: {pack_path}")
+
+        # 1. Validate descriptor
+        descriptor = self.validator.validate_descriptor(yaml_path)
+
+        # 2. Resolve entry_class from descriptor
+        entry_class_path = descriptor["entry_class"]  # e.g. "adapter.ConsoleMockAdapter"
+        module_path, class_name = entry_class_path.rsplit(".", 1)
+
+        # Build the full import path: adapter_packs.<pack_name>.<module_path>
+        full_module_path = f"adapter_packs.{pack_name}.{module_path}"
+
+        self.logger.info(f"Loading adapter: {descriptor['name']} from {full_module_path}.{class_name}")
+
+        # 3. Dynamic import
+        try:
+            module = importlib.import_module(full_module_path)
+            cls = getattr(module, class_name)
+        except (ImportError, AttributeError) as e:
+            raise ImportError(
+                f"Failed to import entry class '{entry_class_path}' from pack '{pack_name}': {e}"
+            )
+
+        # 4. Validate ABC compliance
+        self.validator.validate_class(cls)
+
+        # 5. Instantiate and return
+        instance = cls()
+        self.logger.info(f"Adapter loaded: {instance.platform_name} (v{descriptor['version']})")
+        return instance
+
+    def list_packs(self) -> list[str]:
+        """Lists all available adapter pack names."""
+        if not os.path.isdir(self.packs_dir):
+            return []
+        return [
+            d for d in os.listdir(self.packs_dir)
+            if os.path.isdir(os.path.join(self.packs_dir, d))
+            and os.path.exists(os.path.join(self.packs_dir, d, "adapter.yaml"))
+        ]

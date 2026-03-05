@@ -16,11 +16,11 @@ No raw DB session is ever exposed to handler scope.
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .user import User
+if TYPE_CHECKING:
+    from .user import User
 
 
 @dataclass

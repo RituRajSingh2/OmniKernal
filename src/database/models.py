@@ -22,8 +22,8 @@ class Plugin(Base):
 
     name: Mapped[str] = mapped_column(String(50), primary_key=True)
     version: Mapped[str] = mapped_column(String(20))
-    author: Mapped[str] = mapped_column(String(100), nullable=True)
-    description: Mapped[str] = mapped_column(Text, nullable=True)
+    author: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     
     # Relationships
@@ -43,7 +43,7 @@ class Tool(Base):
     plugin_name: Mapped[str] = mapped_column(ForeignKey("plugins.name"))
     
     # Metadata
-    description: Mapped[str] = mapped_column(Text, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     requires_api_key: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Relationships
@@ -74,8 +74,8 @@ class ExecutionLog(Base):
     command_name: Mapped[str] = mapped_column(String(50))
     raw_input: Mapped[str] = mapped_column(Text)
     success: Mapped[bool] = mapped_column(Boolean)
-    response_time_ms: Mapped[float] = mapped_column(Integer, nullable=True)
-    error_reason: Mapped[str] = mapped_column(Text, nullable=True)
+    response_time_ms: Mapped[Optional[float]] = mapped_column(Integer, nullable=True)
+    error_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 class ApiHealth(Base):
     """

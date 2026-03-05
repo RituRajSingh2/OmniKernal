@@ -5,7 +5,7 @@ Isolates all SQLAlchemy queries. Ensures parameterized inputs and
 consistent error handling.
 """
 
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Any
 from datetime import datetime
 from sqlalchemy import select, update, insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,7 @@ class OmniRepository:
 
     # --- Plugin & Tool Registry ---
 
-    async def register_plugin(self, name: str, version: str, author_name: str = None, description: str = None):
+    async def register_plugin(self, name: str, version: str, author_name: Optional[str] = None, description: Optional[str] = None):
         """Registers or updates a plugin entry."""
         plugin = Plugin(
             name=name,
@@ -33,7 +33,7 @@ class OmniRepository:
         await self.session.merge(plugin)
         await self.session.commit()
 
-    async def register_tool(self, command_name: str, pattern: str, handler_path: str, plugin_name: str, description: str = None):
+    async def register_tool(self, command_name: str, pattern: str, handler_path: str, plugin_name: str, description: Optional[str] = None):
         """Registers or updates a tool entry."""
         tool = Tool(
             command_name=command_name,
@@ -74,8 +74,8 @@ class OmniRepository:
         command_name: str, 
         raw_input: str, 
         success: bool, 
-        response_time_ms: int = None,
-        error_reason: str = None
+        response_time_ms: Optional[int] = None,
+        error_reason: Optional[str] = None
     ):
         """Adds a record to the audit trail."""
         log = ExecutionLog(

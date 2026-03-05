@@ -172,6 +172,20 @@ Replace all file-based lookups with a proper DB. This is the **only source of tr
 |---|---|
 | `api_health` | Tracks error count, last error timestamp, status per external API |
 | `dead_apis` | APIs that exceeded the error threshold — quarantined here automatically |
+### Routing vs Parsing Strategy (New)
+The system distinguishes between **Declarative Patterns** (in `commands.yaml`) and **Routing Overrides** (in the DB `routing_rules` table).
+
+1. **Declarative Patterns (Tool Level):** 
+   - These are the standard `!command <arg>` templates.
+   - Handled by `CommandParser.match()` using the `<name>` placeholder logic.
+   - **Constraint:** All tools within a plugin must use this single pattern style for consistency.
+
+2. **Routing Rules (Registry Level):** 
+   - These allow mapping *arbitrary* regex or alternate triggers to an existing Tool.
+   - **Pattern Inconsistency:** If a routing rule uses a different regex than the tool's intended pattern, the `CommandParser` will be enhanced in Phase 4 to support **Named Regex Groups** from the DB record directly.
+   - **Resilience:** If no pattern is provided in a routing rule, the system defaults to the Tool's original pattern. Per-command level routing ensures that a single plugin can expose multiple distinct triggers.
+
+---
 
 `api_health` schema:
 ```
@@ -468,15 +482,17 @@ inspectable without a running interpreter. Argument schema is undeclared.
 
 #### Option C — Declarative `commands.yaml` + `handlers/` (Chosen ✅)
 
-```
+**Standard Plugin Structure:**
+```text
 plugins/
-  ytplugin/
-    manifest.json           ← Plugin identity (name, version, author, platform)
-    commands.yaml           ← Routing table — command → handler path + arg schema
-    permissions.json        ← Per-command permission flags
-    handlers/
-      ytaudio.py            ← User writes logic here
-      ytstats.py            ← User writes logic here
+  <plugin_name>/
+    |- manifest.json           ← Identity & metadata (version, author)
+    |- commands.yaml           ← Declarative routing & argument schema
+    |- permissions.json        ← RBAC requirements per command
+    |- handlers/               ← Atomic logic (lazy-loaded by Core)
+    |  |- cmd_one.py           ← Handler for !cmd1
+    |  |- cmd_two.py           ← Handler for !cmd2
+    |- utils/                  ← Internal helpers (not exposed to Core)
 ```
 
 **Why this wins:**
@@ -491,6 +507,26 @@ plugins/
 | Boilerplate for a 10-command plugin | Pain | Pain | Clean |
 
 \* Echo plugin: `commands.yaml` is 6 lines. `handlers/echo.py` is 3 lines. Acceptable.
+
+---
+
+### Plugin Architecture & Discovery (Phase 3 Spec)
+Every plugin must follow this atomic structure to be recognized by the `MinimalLoader` and future `PluginEngine`:
+
+```text
+plugins/
+  <plugin_name>/
+    |- manifest.json           ← Identity (locked name/version)
+    |- commands.yaml           ← Logic patterns & argument schemas
+    |- handlers/               ← Dotted path targets for execution
+    |- assets/                 ← Static images/files (Phase 5+)
+```
+
+**Discovery Logic:**
+1. Core scans the `plugins/` directory.
+2. For each folder, it validates `manifest.json`.
+3. It parses `commands.yaml` to register routes in the DB.
+4. **Resilience:** If a handler file is missing at discovery time, the tool is marked as `degraded` in the DB registry but registered nonetheless (fail-fast at execution).
 
 ---
 

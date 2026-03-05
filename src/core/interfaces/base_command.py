@@ -37,7 +37,7 @@ class BaseCommand(ABC):
 
         Example: 'echo', 'ytaudio'. Must match the key in commands.yaml.
         """
-        ...
+        raise NotImplementedError
 
     @property
     @abstractmethod
@@ -48,7 +48,7 @@ class BaseCommand(ABC):
         Example: '!echo <text>', '!ytaudio <url>'.
         The Core's Parser uses this for matching and argument extraction.
         """
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     async def run(self, args: dict[str, Any], ctx: "CommandContext") -> "CommandResult":

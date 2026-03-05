@@ -1,11 +1,12 @@
 import importlib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 from src.core.parser import CommandParser
 from src.core.contracts.command_result import CommandResult
 from src.core.contracts.command_context import CommandContext
 
 if TYPE_CHECKING:
     from src.database.repository import OmniRepository
+    from src.core.contracts.user import User
 
 class EventDispatcher:
     """
@@ -17,7 +18,7 @@ class EventDispatcher:
         self.repository = repository
         self.logger = logger
 
-    async def dispatch(self, sanitized_text: str, user: Any) -> CommandResult | None:
+    async def dispatch(self, sanitized_text: str, user: "User") -> Optional[CommandResult]:
         if not sanitized_text.startswith("!"):
             return None
 
@@ -42,7 +43,12 @@ class EventDispatcher:
             module = importlib.import_module(module_path)
             handler_func = getattr(module, func_name)
             
-            ctx = CommandContext(user=user, logger=self.logger)
+            ctx = CommandContext(
+                user=user, 
+                logger=self.logger,
+                _repository=self.repository,
+                _tool_id=route.id
+            )
             result = await handler_func(args, ctx)
             return result
         except Exception as e:

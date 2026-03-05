@@ -5,11 +5,11 @@ Isolates all SQLAlchemy queries. Ensures parameterized inputs and
 consistent error handling.
 """
 
-from typing import Optional, Sequence
-from datetime import datetime
+from typing import Optional, Sequence, Any
+from datetime import datetime, timezone
 from sqlalchemy import select, update, insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from .models import Plugin, Tool, ExecutionLog, ApiHealth
+from .models import Plugin, Tool, ExecutionLog, ApiHealth, DeadApi, ToolRequirement
 
 class OmniRepository:
     """
@@ -21,7 +21,7 @@ class OmniRepository:
 
     # --- Plugin & Tool Registry ---
 
-    async def register_plugin(self, name: str, version: str, author_name: str = None, description: str = None):
+    async def register_plugin(self, name: str, version: str, author_name: Optional[str] = None, description: Optional[str] = None):
         """Registers or updates a plugin entry."""
         plugin = Plugin(
             name=name,
@@ -33,7 +33,7 @@ class OmniRepository:
         await self.session.merge(plugin)
         await self.session.commit()
 
-    async def register_tool(self, command_name: str, pattern: str, handler_path: str, plugin_name: str, description: str = None):
+    async def register_tool(self, command_name: str, pattern: str, handler_path: str, plugin_name: str, description: Optional[str] = None):
         """Registers or updates a tool entry."""
         tool = Tool(
             command_name=command_name,
@@ -74,8 +74,8 @@ class OmniRepository:
         command_name: str, 
         raw_input: str, 
         success: bool, 
-        response_time_ms: int = None,
-        error_reason: str = None
+        response_time_ms: Optional[int] = None,
+        error_reason: Optional[str] = None
     ):
         """Adds a record to the audit trail."""
         log = ExecutionLog(
@@ -92,25 +92,56 @@ class OmniRepository:
 
     # --- API Health Watchdog ---
 
-    async def update_api_health(self, url: str, success: bool):
-        """Updates failure counts and quarantine status for an API."""
+    async def increment_error(self, url: str, tool_id: int, error_msg: str) -> bool:
+        """
+        Increments failure count. Quarantines and logs to DeadApi if threshold reached.
+        Returns True if the API is now quarantined as a result of this error.
+        """
         health = await self.session.get(ApiHealth, url)
-        
         if not health:
-            health = ApiHealth(url=url)
+            health = ApiHealth(url=url, consecutive_failures=0, error_threshold=3, is_quarantined=False)
             self.session.add(health)
 
-        if success:
-            health.consecutive_failures = 0
-            health.last_success = datetime.utcnow()
-            health.is_quarantined = False
-        else:
-            health.consecutive_failures += 1
-            health.last_failure = datetime.utcnow()
-            if health.consecutive_failures >= health.error_threshold:
-                health.is_quarantined = True
+        health.consecutive_failures += 1
+        health.last_failure = datetime.now(timezone.utc)
+        
+        is_newly_dead = False
+        if health.consecutive_failures >= health.error_threshold and not health.is_quarantined:
+            health.is_quarantined = True
+            is_newly_dead = True
+            
+            # Log to DeadApi
+            dead_api = DeadApi(
+                api_url=url,
+                tool_id=tool_id,
+                error_count=health.consecutive_failures,
+                kill_reason=error_msg
+            )
+            self.session.add(dead_api)
+            
+        await self.session.commit()
+        return is_newly_dead
+
+    async def reset_api_health(self, url: str):
+        """Resets API health after a successful call."""
+        health = await self.session.get(ApiHealth, url)
+        if not health:
+            health = ApiHealth(url=url, consecutive_failures=0, error_threshold=3, is_quarantined=False)
+            self.session.add(health)
+            
+        health.consecutive_failures = 0
+        health.last_success = datetime.now(timezone.utc)
+        health.is_quarantined = False
         
         await self.session.commit()
+
+    async def get_api_key(self, tool_id: int) -> Optional[str]:
+        """Fetches the encrypted API key for a tool."""
+        result = await self.session.execute(
+            select(ToolRequirement).where(ToolRequirement.tool_id == tool_id)
+        )
+        req = result.scalar_one_or_none()
+        return req.api_key_value if req else None
 
     async def is_api_healthy(self, url: str) -> bool:
         """Returns False if the API is quarantined."""

@@ -80,4 +80,4 @@ class PlatformAdapter(ABC):
         Examples: 'whatsapp', 'telegram', 'discord'.
         Used by the Core for logging and adapter registry lookup.
         """
-        ...
+        raise NotImplementedError

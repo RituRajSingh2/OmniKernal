@@ -1,14 +1,17 @@
 import asyncio
 from typing import TYPE_CHECKING
-from datetime import datetime
+from datetime import datetime, timezone
 from src.core.logger import core_logger
 from src.security.sanitizer import CommandSanitizer
 from src.core.dispatcher import EventDispatcher
+from src.core.loader import PluginEngine
 from src.database.session import init_db
 
 if TYPE_CHECKING:
     from src.core.interfaces.platform_adapter import PlatformAdapter
     from src.database.repository import OmniRepository
+    from src.core.contracts.message import Message
+    from src.core.contracts.user import User
 
 class OmniKernal:
     """
@@ -31,6 +34,10 @@ class OmniKernal:
         
         # Initialize DB
         await init_db()
+        
+        # Plugin Discovery (Phase 3)
+        loader = PluginEngine(self.repository)
+        await loader.discover_and_load()
         
         self.dispatcher = EventDispatcher(self.repository, logger=self.logger)
         
@@ -75,7 +82,7 @@ class OmniKernal:
                 self.logger.warning(f"Error in poll loop: {e}")
                 await asyncio.sleep(2)
 
-    async def _process_message(self, msg):
+    async def _process_message(self, msg: "Message"):
         """The processing pipeline."""
         self.logger.debug(f"Received message from {msg.user.id}: {msg.raw_text}")
         
@@ -86,9 +93,9 @@ class OmniKernal:
             return
 
         # 2. Dispatch & Execute
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         result = await self.dispatcher.dispatch(clean_text, msg.user)
-        duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
         
         # 3. Log Execution to DB
         if result:
@@ -97,7 +104,7 @@ class OmniKernal:
                 platform=msg.platform,
                 command_name=clean_text.split(" ")[0][1:],
                 raw_input=msg.raw_text,
-                success=result.success,
+                success=result.ok,
                 response_time_ms=duration_ms,
                 error_reason=result.error_reason
             )

@@ -5,7 +5,7 @@ Defines the tables for the Microkernel registry, execution logging,
 and security watchdog (API health).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import String, DateTime, Boolean, Integer, JSON, ForeignKey, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -22,8 +22,8 @@ class Plugin(Base):
 
     name: Mapped[str] = mapped_column(String(50), primary_key=True)
     version: Mapped[str] = mapped_column(String(20))
-    author: Mapped[str] = mapped_column(String(100), nullable=True)
-    description: Mapped[str] = mapped_column(Text, nullable=True)
+    author: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     
     # Relationships
@@ -43,7 +43,7 @@ class Tool(Base):
     plugin_name: Mapped[str] = mapped_column(ForeignKey("plugins.name"))
     
     # Metadata
-    description: Mapped[str] = mapped_column(Text, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     requires_api_key: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Relationships
@@ -68,14 +68,14 @@ class ExecutionLog(Base):
     __tablename__ = "execution_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     user_id: Mapped[str] = mapped_column(String(100))
     platform: Mapped[str] = mapped_column(String(50))
     command_name: Mapped[str] = mapped_column(String(50))
     raw_input: Mapped[str] = mapped_column(Text)
     success: Mapped[bool] = mapped_column(Boolean)
-    response_time_ms: Mapped[float] = mapped_column(Integer, nullable=True)
-    error_reason: Mapped[str] = mapped_column(Text, nullable=True)
+    response_time_ms: Mapped[Optional[float]] = mapped_column(Integer, nullable=True)
+    error_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 class ApiHealth(Base):
     """
@@ -89,3 +89,27 @@ class ApiHealth(Base):
     last_failure: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_quarantined: Mapped[bool] = mapped_column(Boolean, default=False)
     error_threshold: Mapped[int] = mapped_column(Integer, default=3)
+
+class DeadApi(Base):
+    """
+    History and logging of quarantined APIs.
+    """
+    __tablename__ = "dead_apis"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_url: Mapped[str] = mapped_column(String(255), index=True)
+    tool_id: Mapped[Optional[int]] = mapped_column(ForeignKey("tools.id"), nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer)
+    killed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    kill_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reactivated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+class ToolRequirement(Base):
+    """
+    Stores encrypted API keys for tools.
+    """
+    __tablename__ = "tool_requirements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id"), unique=True)
+    api_key_value: Mapped[str] = mapped_column(Text) # Stored ENCRYPTED

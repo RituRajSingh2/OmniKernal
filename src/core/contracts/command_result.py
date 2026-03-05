@@ -12,8 +12,8 @@ They return a CommandResult and the Core handles delivery.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
+from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class CommandResult:
@@ -34,11 +34,11 @@ class CommandResult:
     """
 
     ok: bool
-    reply: str | None = None
-    error_reason: str | None = None
+    reply: Optional[str] = None
+    error_reason: Optional[str] = None
 
     @classmethod
-    def success(cls, reply: str | None = None) -> "CommandResult":
+    def success(cls, reply: Optional[str] = None) -> "CommandResult":
         """
         Build a successful result.
 

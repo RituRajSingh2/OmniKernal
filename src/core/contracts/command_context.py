@@ -16,11 +16,12 @@ No raw DB session is ever exposed to handler scope.
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
-from .user import User
+if TYPE_CHECKING:
+    from .user import User
+    from src.database.repository import OmniRepository
 
 
 @dataclass
@@ -35,15 +36,12 @@ class CommandContext:
 
     user: User
     logger: Any = field(default=None, repr=False)
-    # get_api_key() will be added as a method in Phase 2.5
-    # when EncryptionEngine and repository layer are available.
+    _repository: Optional["OmniRepository"] = field(default=None, repr=False)
+    _tool_id: Optional[int] = field(default=None, repr=False)
 
     async def get_api_key(self, service: str) -> str:
         """
         Retrieve and decrypt an API key for the given service.
-
-        Phase 0 stub — raises NotImplementedError until Phase 2.5
-        wires up the EncryptionEngine + ApiKeyRepository.
 
         Args:
             service: Service name as declared in plugin's commands.yaml
@@ -51,10 +49,21 @@ class CommandContext:
 
         Returns:
             Decrypted plaintext API key — only in handler scope, never logged.
+            
+        Raises:
+            ValueError: If no API key is found for this tool or decryption fails.
         """
-        raise NotImplementedError(
-            "get_api_key() is not available until Phase 2.5 (Security & Resilience Layer)."
-        )
+        if not self._repository or not self._tool_id:
+            raise RuntimeError("Repository or tool_id not configured in CommandContext.")
+            
+        # In a more complex setup, you'd fetch the specific 'service' key. 
+        # For now, we assume one key per tool in ToolRequirements.
+        encrypted_key = await self._repository.get_api_key(self._tool_id)
+        if not encrypted_key:
+            raise ValueError(f"No API key found configured for tool '{service}' (tool_id={self._tool_id})")
+
+        from src.security.encryption import EncryptionEngine
+        return EncryptionEngine.decrypt(encrypted_key)
 
     def __repr__(self) -> str:
         return f"CommandContext(user={self.user!r})"

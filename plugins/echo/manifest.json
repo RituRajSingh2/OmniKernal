@@ -1,0 +1,7 @@
+{
+    "name": "echo",
+    "version": "1.0.0",
+    "author": "OmniKernal Core",
+    "description": "A simple echo plugin to verify the Phase 3 Plugin Layer.",
+    "supported_platforms": ["any"]
+}

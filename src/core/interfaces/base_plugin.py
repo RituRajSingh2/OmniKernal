@@ -32,7 +32,7 @@ class BasePlugin(ABC):
         Must match the folder name under plugins/ and the 'name'
         field in manifest.json. Example: 'echo', 'ytplugin'.
         """
-        ...
+        raise NotImplementedError
 
     @property
     @abstractmethod
@@ -42,7 +42,7 @@ class BasePlugin(ABC):
 
         Example: '1.0.0'. Must match manifest.json 'version'.
         """
-        ...
+        raise NotImplementedError
 
     @property
     @abstractmethod
@@ -53,7 +53,7 @@ class BasePlugin(ABC):
         Example: ['whatsapp', 'any'].
         The Core uses this to filter plugins per active adapter.
         """
-        ...
+        raise NotImplementedError
 
     @property
     @abstractmethod
@@ -63,4 +63,4 @@ class BasePlugin(ABC):
 
         Example: 'Echo back the input text'.
         """
-        ...
+        raise NotImplementedError

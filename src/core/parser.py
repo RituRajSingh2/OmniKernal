@@ -6,7 +6,7 @@ Uses regex generated from the declarative patterns in commands.yaml.
 """
 
 import re
-from typing import Any
+from typing import Any, Optional
 
 class CommandParser:
     """
@@ -18,7 +18,7 @@ class CommandParser:
     """
 
     @classmethod
-    def match(cls, text: str, pattern: str) -> dict[str, str] | None:
+    def match(cls, text: str, pattern: str) -> Optional[dict[str, str]]:
         """
         Attempts to match text against a pattern.
         Returns a dict of extracted arguments on success, or None on failure.

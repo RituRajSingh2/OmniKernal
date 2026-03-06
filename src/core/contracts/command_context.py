@@ -24,17 +24,19 @@ if TYPE_CHECKING:
     from src.database.repository import OmniRepository
 
 
-@dataclass
+# BUG 14: frozen=True prevents handlers from mutating ctx.user / ctx.logger
+# after construction. get_api_key() only reads fields — no conflict with frozen.
+@dataclass(frozen=True)
 class CommandContext:
     """
-    Safe capability surface provided to command handlers by the Core.
+    Safe, immutable capability surface provided to command handlers by the Core.
 
     Attributes:
         user:   The User who triggered this command.
         logger: Structured logger scoped to this execution (wired in Phase 1).
     """
 
-    user: User
+    user: "User"
     logger: Any = field(default=None, repr=False)
     _repository: Optional["OmniRepository"] = field(default=None, repr=False)
     _tool_id: Optional[int] = field(default=None, repr=False)
@@ -49,18 +51,18 @@ class CommandContext:
 
         Returns:
             Decrypted plaintext API key — only in handler scope, never logged.
-            
+
         Raises:
             ValueError: If no API key is found for this tool or decryption fails.
         """
         if not self._repository or not self._tool_id:
             raise RuntimeError("Repository or tool_id not configured in CommandContext.")
-            
-        # In a more complex setup, you'd fetch the specific 'service' key. 
-        # For now, we assume one key per tool in ToolRequirements.
+
         encrypted_key = await self._repository.get_api_key(self._tool_id)
         if not encrypted_key:
-            raise ValueError(f"No API key found configured for tool '{service}' (tool_id={self._tool_id})")
+            raise ValueError(
+                f"No API key found configured for tool '{service}' (tool_id={self._tool_id})"
+            )
 
         from src.security.encryption import EncryptionEngine
         return EncryptionEngine.decrypt(encrypted_key)

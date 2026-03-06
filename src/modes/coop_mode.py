@@ -4,8 +4,8 @@ CoopMode — Human-in-the-Loop Execution Mode
 Messages are held in a pending queue until a human explicitly approves
 or rejects them. Only approved messages are routed through the Core pipeline.
 
-This mode is designed for supervised operation where the operator wants
-full control over what the bot responds to.
+BUG 22 fix: approval tasks are now tracked in self._active_tasks and
+cancelled on loop exit to prevent orphaned tasks surviving shutdown.
 """
 
 import asyncio
@@ -25,6 +25,9 @@ class CoopMode:
     Polling loop: fetch_new_messages() → add to pending queue → wait for approval.
     Approval: approve(msg_id) releases message to core.process().
     Rejection: reject(msg_id) discards message with a log entry.
+
+    BUG 22 fix: all background approval tasks are tracked and cancelled
+    when the polling loop exits, ensuring deterministic shutdown.
     """
 
     def __init__(self, poll_interval: float = 1.0):
@@ -36,6 +39,8 @@ class CoopMode:
         # Approval signals: msg_id -> asyncio.Event
         self._approval_events: dict[str, asyncio.Event] = {}
         self._rejected: set[str] = set()
+        # BUG 22 fix: track all background tasks so we can cancel on shutdown
+        self._active_tasks: set[asyncio.Task] = set()
 
     @property
     def pending_messages(self) -> list["Message"]:
@@ -111,22 +116,40 @@ class CoopMode:
             "Awaiting human approval for each message."
         )
 
-        while core.is_running:
-            try:
-                messages = await adapter.fetch_new_messages()
+        try:
+            while core.is_running:
+                try:
+                    messages = await adapter.fetch_new_messages()
 
-                for msg in messages:
-                    # Don't await — let each message wait for approval concurrently
-                    asyncio.create_task(self._process_with_approval(msg, core))
+                    for msg in messages:
+                        # BUG 22 fix: track task; remove from set when done
+                        task = asyncio.create_task(
+                            self._process_with_approval(msg, core),
+                            name=f"coop_approval_{msg.id}"
+                        )
+                        self._active_tasks.add(task)
+                        task.add_done_callback(self._active_tasks.discard)
 
-                await asyncio.sleep(self.poll_interval)
+                    await asyncio.sleep(self.poll_interval)
 
-            except asyncio.CancelledError:
-                self.logger.info("CoopMode loop cancelled.")
-                break
-            except Exception as e:
-                self.logger.warning(f"CoopMode error: {e}. Retrying in 2s.")
-                await asyncio.sleep(2)
+                except asyncio.CancelledError:
+                    self.logger.info("CoopMode loop cancelled.")
+                    break
+                except Exception as e:
+                    self.logger.warning(f"CoopMode error: {e}. Retrying in 2s.")
+                    await asyncio.sleep(2)
+        finally:
+            # BUG 22 fix: cancel all pending approval tasks on exit
+            if self._active_tasks:
+                self.logger.info(
+                    f"CoopMode cleanup: cancelling {len(self._active_tasks)} "
+                    "pending approval task(s)."
+                )
+                for task in list(self._active_tasks):
+                    task.cancel()
+                # Wait for all cancellations to complete
+                await asyncio.gather(*self._active_tasks, return_exceptions=True)
+                self._active_tasks.clear()
 
         self.logger.info("CoopMode stopped.")
 
@@ -134,9 +157,13 @@ class CoopMode:
         self, msg: "Message", core: "OmniKernal"
     ) -> None:
         """Internal: holds for approval then routes through Core."""
-        approved = await self._hold_for_approval(msg)
-        if approved:
-            self.logger.info(f"Processing approved message: {msg.id}")
-            await core.process(msg)
-        else:
-            self.logger.info(f"Skipped rejected message: {msg.id}")
+        try:
+            approved = await self._hold_for_approval(msg)
+            if approved:
+                self.logger.info(f"Processing approved message: {msg.id}")
+                await core.process(msg)
+            else:
+                self.logger.info(f"Skipped rejected message: {msg.id}")
+        except asyncio.CancelledError:
+            self.logger.info(f"Approval task for '{msg.id}' was cancelled during shutdown.")
+            raise

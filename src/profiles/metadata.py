@@ -3,6 +3,14 @@ ProfileMetadata — Encrypted metadata.json Read/Write
 
 Stores profile configuration and session data. Sensitive fields
 are encrypted at rest using the EncryptionEngine from Phase 2.5.
+
+BUG 11 note: save() always expects PLAINTEXT values for SENSITIVE_FIELDS.
+Never pass a dict obtained from load() back into save() without going through
+the full decrypt → modify → save cycle, or session_data will be double-encrypted.
+The safe pattern is:
+    data = metadata.load(name)      # returns decrypted values
+    data["session_data"] = new_val  # update with plaintext
+    metadata.save(name, data)       # re-encrypts cleanly
 """
 
 import os
@@ -28,12 +36,16 @@ class ProfileMetadata:
         created_at: str     — ISO timestamp
         headless: bool      — Whether this profile runs headless
         session_data: str   — Encrypted session/auth data (encrypted at rest)
+
+    BUG 11: save() encrypts sensitive fields unconditionally if they are non-empty.
+    Callers MUST ensure they only pass plaintext values for SENSITIVE_FIELDS.
+    Passing an already-encrypted value results in double-encryption (silent corruption).
     """
 
     def __init__(self, profiles_dir: str = PROFILES_DIR):
         self.profiles_dir = profiles_dir
         self.logger = core_logger.bind(subsystem="profile_metadata")
-        
+
         if not os.getenv("OMNIKERNAL_SECRET_KEY"):
             self.logger.warning(
                 "OMNIKERNAL_SECRET_KEY not set. Profiles will use a temporary DEVELOPMENT key. "
@@ -49,7 +61,15 @@ class ProfileMetadata:
 
         Args:
             profile_name: Profile directory name.
-            data: Metadata dict to persist.
+            data: Metadata dict to persist. Values for SENSITIVE_FIELDS must be
+                  plaintext strings — they will be encrypted by this method.
+
+        BUG 11 warning: do NOT pass a dict that was previously returned by load()
+        without first decrypting-then-plaintext-setting the sensitive fields.
+        load() decrypts automatically, so the round-trip is safe as long as you
+        don't re-load without modifying (which would pass plaintext to save() again,
+        which is correct). The dangerous case is keeping raw ciphertext in a dict
+        and passing it here — that will double-encrypt.
         """
         encrypted_data = dict(data)
 

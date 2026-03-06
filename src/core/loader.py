@@ -1,5 +1,5 @@
 """
-PluginEngine ΓÇö Declarative Plugin Discovery & Loading
+PluginEngine — Declarative Plugin Discovery & Loading
 
 Scans the plugins/ directory, validates manifest.json and commands.yaml,
 and registers findings into the OmniRepository.
@@ -29,14 +29,14 @@ class PluginEngine:
         Scans the plugins directory and registers valid plugins in the DB.
         """
         self.logger.info(f"Scanning for plugins in: {self.plugins_dir}")
-        
+
         if not os.path.exists(self.plugins_dir):
             self.logger.warning(f"Plugins directory not found: {self.plugins_dir}")
             return
 
         for plugin_folder in os.listdir(self.plugins_dir):
             plugin_path = os.path.join(self.plugins_dir, plugin_folder)
-            
+
             if not os.path.isdir(plugin_path):
                 continue
 
@@ -51,16 +51,22 @@ class PluginEngine:
             self.logger.debug(f"Skipping {folder_name}: No manifest.json found.")
             return
 
+        name: Optional[str] = None  # track for degraded-status fallback
+
         try:
             # 1. Load & Validate Manifest
             with open(manifest_path, "r", encoding="utf-8") as f:
                 manifest = json.load(f)
-            
-            # Basic validation (locked name/version)
+
             name = manifest.get("name")
             version = manifest.get("version")
             if not name or not version:
                 raise ValueError("Manifest missing 'name' or 'version'")
+
+            # BUG 6 fix: support both 'platform' (spec key) and the legacy
+            # 'supported_platforms' key that was used in early manifests.
+            # Normalise to 'platform' going forward.
+            platform = manifest.get("platform") or manifest.get("supported_platforms") or ["any"]
 
             # 2. Register Plugin in DB
             await self.repo.register_plugin(
@@ -74,7 +80,7 @@ class PluginEngine:
             if os.path.exists(commands_path):
                 with open(commands_path, "r", encoding="utf-8") as f:
                     cmd_cfg = yaml.safe_load(f)
-                
+
                 commands = cmd_cfg.get("commands", {})
                 for cmd_name, cmd_info in commands.items():
                     await self.repo.register_tool(
@@ -84,8 +90,19 @@ class PluginEngine:
                         plugin_name=name,
                         description=cmd_info.get("description")
                     )
-            
-            self.logger.info(f"Successfully loaded plugin: {name} (v{version})")
+
+            self.logger.info(f"Successfully loaded plugin: {name} (v{version}) platforms={platform}")
 
         except Exception as e:
-            self.logger.error(f"Failed to load plugin {folder_name}: {e}")
+            self.logger.error(f"Failed to load plugin '{folder_name}': {e}")
+            # BUG 13 fix: mark the plugin as inactive in DB if it was registered
+            # before the failure occurred, so dispatching returns a clear "degraded"
+            # signal instead of a silent "no route found".
+            if name:
+                try:
+                    await self.repo.set_plugin_inactive(name)
+                    self.logger.warning(
+                        f"Plugin '{name}' marked inactive in DB due to load failure."
+                    )
+                except Exception as inner:
+                    self.logger.error(f"Could not mark plugin '{name}' inactive: {inner}")

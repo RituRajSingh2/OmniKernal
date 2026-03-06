@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Optional
 from datetime import datetime, timezone
 from src.core.logger import core_logger
 from src.security.sanitizer import CommandSanitizer
+from src.security.watchdog import ApiWatchdog          # BUG 4: was missing
 from src.core.dispatcher import EventDispatcher
 from src.core.loader import PluginEngine
 from src.database.session import init_db
@@ -35,8 +36,9 @@ class OmniKernal:
         self.mode = mode
         self.profile_manager = ProfileManager(profiles_dir)
         self.mode_manager = ModeManager()
-        self.dispatcher = None  # Set in start()
-        self.headless: bool = False  # Resolved from profile on boot
+        self.dispatcher: Optional[EventDispatcher] = None   # BUG 12: explicit type
+        self.watchdog = ApiWatchdog(repository)             # BUG 4: wire watchdog
+        self.headless: bool = False
         self.logger = core_logger.bind(profile=profile_name)
         self.is_running = False
         self._stop_event = asyncio.Event()
@@ -107,6 +109,12 @@ class OmniKernal:
 
     async def process(self, msg: "Message") -> None:
         """Public processing pipeline — called by SelfMode and CoopMode."""
+
+        # BUG 12: guard against dispatcher not yet initialised (race in early stop())
+        if self.dispatcher is None:
+            self.logger.warning("process() called before dispatcher was initialised.")
+            return
+
         self.logger.debug(f"Received message from {msg.user.id}: {msg.raw_text}")
 
         # 1. Sanitize
@@ -136,5 +144,15 @@ class OmniKernal:
         if result and result.reply:
             self.logger.info(f"Command succeeded. Sending reply to {msg.user.id}")
             await self.adapter.send_message(msg.user.id, result.reply)
-        elif result and not result.success:
+
+        # BUG 1 fix: was `result.success` — that attribute does not exist; `.ok` is correct
+        # BUG 4 fix: record API failure in watchdog when handler reports one
+        elif result and not result.ok:
             self.logger.error(f"Command failed: {result.error_reason}")
+            if result.api_url:
+                cmd_name = clean_text.split(" ")[0][1:]
+                tool = await self.repository.get_tool_by_command(cmd_name)
+                if tool:
+                    await self.watchdog.record_failure(
+                        result.api_url, tool.id, result.error_reason or "unknown"
+                    )

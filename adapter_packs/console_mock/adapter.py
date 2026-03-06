@@ -6,7 +6,7 @@ Implements the full PlatformAdapter contract using in-memory queues.
 No SDK, no browser, no network — purely synthetic.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone          # BUG 8 fix: import timezone
 from src.core.interfaces.platform_adapter import PlatformAdapter
 from src.core.contracts.message import Message
 from src.core.contracts.user import User
@@ -22,7 +22,9 @@ class ConsoleMockAdapter(PlatformAdapter):
     """
 
     def __init__(self):
-        self._platform_name = "console_mock"
+        # BUG 16 fix: aligned with adapter.yaml `platform: console`
+        # Previously "console_mock" (adapter) vs "console" (yaml) — inconsistent.
+        self._platform_name = "console"
         self._message_queue: list[Message] = []
         self.sent_messages: list[str] = []
         self._connected = False
@@ -62,7 +64,8 @@ class ConsoleMockAdapter(PlatformAdapter):
             id=f"mock_{len(self._message_queue)}",
             raw_text=raw_text,
             user=User(id=user_id, display_name="TestUser", platform="console", role="admin"),
-            timestamp=datetime.now(),
+            # BUG 8 fix: was datetime.now() (timezone-naive), now timezone-aware UTC
+            timestamp=datetime.now(timezone.utc),
             platform="console"
         )
         self._message_queue.append(msg)

@@ -1,6 +1,7 @@
 import importlib
 from typing import TYPE_CHECKING, Any, Optional
 from src.core.parser import CommandParser
+from src.core.permissions import PermissionValidator          # BUG 5: was missing
 from src.core.contracts.command_result import CommandResult
 from src.core.contracts.command_context import CommandContext
 
@@ -24,27 +25,30 @@ class EventDispatcher:
 
         parts = sanitized_text.split(" ", 1)
         command_trigger = parts[0][1:].lower()
-        
+
         # 1. Lookup route in DB
         route = await self.repository.get_tool_by_command(command_trigger)
         if not route:
             return None
 
-        # 2. Parse arguments using the pattern from DB
+        # 2. BUG 5 fix: enforce permissions before execution
+        #    Default required role is "user"; administrators bypass all checks.
+        if not PermissionValidator.check_permission(user, required_role="user"):
+            return CommandResult.error("Permission denied")
+
+        # 3. Parse arguments using the pattern from DB
         args = CommandParser.match(sanitized_text, route.pattern)
         if args is None:
             return CommandResult.error(f"Usage: {route.pattern}")
 
-        # 3. Execute handler (Phase 2 uses dynamic import)
+        # 4. Execute handler (lazy import — only on first call per command)
         try:
-            # Dynamic import of the handler
-            # In Phase 1 we had a callback, in Phase 2+ we follow the DESIGN.md lazy load
             module_path, func_name = route.handler_path.rsplit(".", 1)
             module = importlib.import_module(module_path)
             handler_func = getattr(module, func_name)
-            
+
             ctx = CommandContext(
-                user=user, 
+                user=user,
                 logger=self.logger,
                 _repository=self.repository,
                 _tool_id=route.id

@@ -67,7 +67,7 @@ class TestAdapterLoader:
         adapter = loader.load("console_mock")
 
         assert isinstance(adapter, PlatformAdapter)
-        assert adapter.platform_name == "console_mock"
+        assert adapter.platform_name == "console"   # BUG 16 fix: aligned with adapter.yaml
 
     def test_load_nonexistent_pack_raises(self):
         loader = AdapterLoader()

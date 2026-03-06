@@ -10,15 +10,15 @@ Demonstrates the full Core Engine loop using AdapterLoader:
 
 import asyncio
 from src.core.engine import OmniKernal
-from src.database.session import async_session_factory, init_db
+from src.database.session import async_session_factory, ensure_db_initialized  # BUG 43
 from src.database.repository import OmniRepository
 from src.adapters.loader import AdapterLoader
 
 
 async def run_smoke_test():
-    # 1. Initialize DB and Repository
+    # 1. Initialize DB and Repository (BUG 43: use idempotent helper)
     print("[Core] Initializing Database...")
-    await init_db()
+    await ensure_db_initialized()
 
     async with async_session_factory() as session:
         repo = OmniRepository(session)

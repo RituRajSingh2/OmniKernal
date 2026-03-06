@@ -9,6 +9,13 @@ OmniRepository directly — respects the architectural layering.
 
 BUG 20 fix: Re-checks user role against OMNIKERNAL_ADMINS env var before
 permission validation so admin features are actually reachable.
+
+BUG 39 fix: Permission check now uses effective_role (after OMNIKERNAL_ADMINS
+elevation) instead of user.role (original frozen field).
+
+BUG 42 fix: Handler import path is prefixed with the plugin root module
+(plugins.<plugin_name>.) so importlib resolves handlers correctly for
+all plugins, not just echo which happened to be a top-level package.
 """
 
 import os
@@ -64,18 +71,14 @@ class EventDispatcher:
         parts = sanitized_text.split(" ", 1)
         command_trigger = parts[0][1:].lower()
 
-        # 1. Lookup route via CommandRouter (BUG 19)
+        # 1. Lookup route via CommandRouter (BUG 19 + BUG 30)
         route = await self.router.get_route(command_trigger)
         if not route:
             return None
 
-        # 2. BUG 20 fix: resolve effective role (env-var admin check) before ACL
+        # 2. BUG 39 fix: resolve effective role, then check that directly
         effective_role = _resolve_role(user)
-        # Build an effective user with corrected role for permission check
-        # (User is frozen, so we check the effective_role string directly)
-        if effective_role != "admin" and not PermissionValidator.check_permission(
-            user, required_role="user"
-        ):
+        if not PermissionValidator.check_role(effective_role, required_role="user"):
             return CommandResult.error("Permission denied")
 
         # 3. Parse arguments using the pattern from the route
@@ -84,8 +87,16 @@ class EventDispatcher:
             return CommandResult.error(f"Usage: {route['pattern']}")
 
         # 4. Execute handler (lazy import)
+        # BUG 42 fix: prefix handler_path with the plugin's root module so
+        # importlib resolves it correctly regardless of sys.path state.
         try:
-            module_path, func_name = route["handler_path"].rsplit(".", 1)
+            raw_handler_path = route["handler_path"]  # e.g. "handlers.echo.run"
+            plugin_name = route["plugin_name"]         # e.g. "echo"
+
+            # Build absolute dotted path: plugins.echo.handlers.echo
+            full_handler_path = f"plugins.{plugin_name}.{raw_handler_path}"
+            module_path, func_name = full_handler_path.rsplit(".", 1)
+
             module = importlib.import_module(module_path)
             handler_func = getattr(module, func_name)
 

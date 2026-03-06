@@ -142,7 +142,13 @@ class ProfileLock:
             return True
 
         # Stale lock — clean it up
-        self.release(profile_name)
+        # BUG 61 fix: needs to bypass the ownership check if we're cleaning up
+        # after a dead process that wasn't us.
+        try:
+            os.remove(lock_file)
+            self.logger.info(f"Cleared stale lock for '{profile_name}'.")
+        except FileNotFoundError:
+            pass
         return False
 
     def get_active_count(self) -> int:

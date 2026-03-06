@@ -186,7 +186,8 @@ class OmniRepository:
         if success:
             await self.reset_api_health(url)
         else:
-            await self.increment_error(url, tool_id=0, error_msg="health update")
+            # BUG 54 fix: use None instead of 0 for tool_id to avoid FK issues
+            await self.increment_error(url, tool_id=None, error_msg="health update")
 
     async def reactivate_api(self, url: str) -> None:
         """
@@ -201,10 +202,9 @@ class OmniRepository:
             await self.session.commit()
 
         # Also mark corresponding DeadApi row as reactivated
-        from sqlalchemy import update as sa_update
-        from .models import DeadApi
+        # BUG 56: Removed redundant local imports
         await self.session.execute(
-            sa_update(DeadApi)
+            update(DeadApi)
             .where(DeadApi.api_url == url, DeadApi.reactivated == False)
             .values(reactivated=True)
         )

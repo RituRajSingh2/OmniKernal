@@ -1,0 +1,21 @@
+{
+  "1_concurrent": {
+    "n_concurrent": 1,
+    "total_ms": 16.933,
+    "per_msg_ms": 16.562,
+    "throughput_msg_per_sec": 59.1
+  },
+  "10_concurrent": {
+    "n_concurrent": 10,
+    "total_ms": 222.05,
+    "per_msg_ms": 105.034,
+    "throughput_msg_per_sec": 45.0
+  },
+  "50_concurrent": {
+    "n_concurrent": 50,
+    "total_ms": 881.321,
+    "per_msg_ms": 333.316,
+    "throughput_msg_per_sec": 56.7
+  },
+  "_timestamp": "2026-03-06T05:31:08.745478+00:00"
+}

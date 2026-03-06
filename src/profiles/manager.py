@@ -57,10 +57,10 @@ class ProfileManager:
 
     def activate(self, name: str) -> dict:
         """
-        Activates a profile: acquires lock and enforces headless if needed.
+        Activates a profile: acquires lock and resolves flags (headless).
 
         Returns:
-            Updated metadata dict with headless flag set appropriately.
+            Resolved metadata dict (including forced flags).
 
         Raises:
             FileNotFoundError: If the profile doesn't exist.
@@ -73,16 +73,16 @@ class ProfileManager:
         # Acquire PID lock
         self.lock.acquire(name)
 
-        # Check headless enforcement
+        # Load metadata
         meta = self.metadata.load(name) or {}
+        
+        # Enforce headless if needed, but don't overwrite user preference in JSON
+        # unless specifically desired. For now, we resolve it for the caller.
         force_headless = self.should_force_headless()
-
         if force_headless:
             meta["headless"] = True
-            self.metadata.save(name, meta)
             self.logger.warning(
-                f"Multiple profiles active ({self.lock.get_active_count()}). "
-                f"Forcing headless mode for '{name}'."
+                f"Multiple profiles active. Resolve status for '{name}': force_headless=True"
             )
 
         self.logger.info(f"Profile activated: {name} (headless={meta.get('headless', False)})")
@@ -90,18 +90,9 @@ class ProfileManager:
 
     def deactivate(self, name: str) -> None:
         """
-        Deactivates a profile: releases lock and resets headless flag.
-
-        Args:
-            name: Profile name to deactivate.
+        Deactivates a profile: releases lock.
         """
         self.lock.release(name)
-
-        meta = self.metadata.load(name)
-        if meta:
-            meta["headless"] = False
-            self.metadata.save(name, meta)
-
         self.logger.info(f"Profile deactivated: {name}")
 
     def list_profiles(self) -> list[str]:

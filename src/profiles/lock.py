@@ -39,28 +39,44 @@ class ProfileLock:
     def acquire(self, profile_name: str) -> None:
         """
         Acquires the lock for a profile by writing the current PID.
+        Uses atomic file creation (O_CREAT | O_EXCL) to prevent race conditions.
 
         Raises:
             RuntimeError: If the lock is already held by a live process.
         """
         lock_file = self._lock_path(profile_name)
+        os.makedirs(os.path.dirname(lock_file), exist_ok=True)
 
+        # 1. Check for existing lock
         if os.path.exists(lock_file):
-            with open(lock_file, "r") as f:
-                existing_pid = int(f.read().strip())
+            try:
+                with open(lock_file, "r") as f:
+                    content = f.read().strip()
+                    existing_pid = int(content) if content else None
+            except (ValueError, OSError):
+                existing_pid = None
 
-            if self._pid_is_alive(existing_pid):
+            if existing_pid and self._pid_is_alive(existing_pid):
                 raise RuntimeError(
                     f"Profile '{profile_name}' is already locked by PID {existing_pid}."
                 )
             else:
                 self.logger.warning(
-                    f"Clearing stale lock for '{profile_name}' (PID {existing_pid} is dead)."
+                    f"Clearing stale lock for '{profile_name}'."
                 )
+                self.release(profile_name)
 
-        os.makedirs(os.path.dirname(lock_file), exist_ok=True)
-        with open(lock_file, "w") as f:
-            f.write(str(os.getpid()))
+        # 2. Atomic creation
+        try:
+            # os.O_EXCL ensures the call fails if the file already exists
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as f:
+                f.write(str(os.getpid()))
+        except FileExistsError:
+            # Rare race condition: someone else created it between our exists check and open
+            raise RuntimeError(
+                f"Profile '{profile_name}' was locked by another process during acquisition."
+            )
 
         self.logger.info(f"Lock acquired for '{profile_name}' (PID {os.getpid()}).")
 

@@ -33,6 +33,12 @@ class ProfileMetadata:
     def __init__(self, profiles_dir: str = PROFILES_DIR):
         self.profiles_dir = profiles_dir
         self.logger = core_logger.bind(subsystem="profile_metadata")
+        
+        if not os.getenv("OMNIKERNAL_SECRET_KEY"):
+            self.logger.warning(
+                "OMNIKERNAL_SECRET_KEY not set. Profiles will use a temporary DEVELOPMENT key. "
+                "Data encrypted today will be lost on the next server restart if context is lost."
+            )
 
     def _metadata_path(self, profile_name: str) -> str:
         return os.path.join(self.profiles_dir, profile_name, "metadata.json")

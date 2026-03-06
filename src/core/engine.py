@@ -1,11 +1,12 @@
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 from datetime import datetime, timezone
 from src.core.logger import core_logger
 from src.security.sanitizer import CommandSanitizer
 from src.core.dispatcher import EventDispatcher
 from src.core.loader import PluginEngine
 from src.database.session import init_db
+from src.profiles.manager import ProfileManager
 
 if TYPE_CHECKING:
     from src.core.interfaces.platform_adapter import PlatformAdapter
@@ -19,11 +20,19 @@ class OmniKernal:
     Platform-agnostic and logic-agnostic.
     """
 
-    def __init__(self, adapter: "PlatformAdapter", repository: "OmniRepository", profile_name: str = "main"):
+    def __init__(
+        self,
+        adapter: "PlatformAdapter",
+        repository: "OmniRepository",
+        profile_name: str = "main",
+        profiles_dir: str = "profiles"
+    ):
         self.adapter = adapter
         self.repository = repository
-        self.dispatcher = None # Set in start()
         self.profile_name = profile_name
+        self.profile_manager = ProfileManager(profiles_dir)
+        self.dispatcher = None  # Set in start()
+        self.headless: bool = False  # Resolved from profile on boot
         self.logger = core_logger.bind(profile=profile_name)
         self.is_running = False
         self._stop_event = asyncio.Event()
@@ -31,21 +40,33 @@ class OmniKernal:
     async def start(self):
         """Boot sequence."""
         self.logger.info(f"Booting OmniKernal for platform: {self.adapter.platform_name}")
-        
+
         # Initialize DB
         await init_db()
-        
+
+        # Profile Activation (Phase 5)
+        # Creates profile directory if first run, acquires PID lock, resolves headless flag.
+        if not self.profile_manager.get_profile(self.profile_name):
+            self.logger.info(f"First run: creating profile '{self.profile_name}'.")
+            self.profile_manager.create(self.profile_name, self.adapter.platform_name)
+
+        meta = self.profile_manager.activate(self.profile_name)
+        self.headless = meta.get("headless", False)
+        self.logger.info(
+            f"Profile '{self.profile_name}' activated. headless={self.headless}"
+        )
+
         # Plugin Discovery (Phase 3)
         loader = PluginEngine(self.repository)
         await loader.discover_and_load()
-        
+
         self.dispatcher = EventDispatcher(self.repository, logger=self.logger)
-        
+
         try:
             await self.adapter.connect()
             self.is_running = True
             self.logger.info("Adapter connected. Entering poll loop.")
-            
+
             await self._poll_loop()
         except Exception as e:
             self.logger.error(f"Boot failed: {e}")
@@ -62,6 +83,13 @@ class OmniKernal:
         self.is_running = False
         self._stop_event.set()
         await self.adapter.disconnect()
+
+        # Profile Deactivation (Phase 5) — release PID lock
+        try:
+            self.profile_manager.deactivate(self.profile_name)
+        except Exception as e:
+            self.logger.warning(f"Profile deactivation warning: {e}")
+
         self.logger.info("Shutdown complete.")
 
     async def _poll_loop(self):

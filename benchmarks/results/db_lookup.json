@@ -1,0 +1,15 @@
+{
+  "iterations": 100,
+  "db_lookup": {
+    "min_ms": 1.368,
+    "max_ms": 2.398,
+    "mean_ms": 1.61
+  },
+  "dict_baseline": {
+    "min_ms": 0.0001,
+    "max_ms": 0.001,
+    "mean_ms": 0.0002
+  },
+  "overhead_factor": 9999.8,
+  "_timestamp": "2026-03-06T05:31:07.529017+00:00"
+}

@@ -1,0 +1,11 @@
+{
+  "bad_handler_crashed_engine": false,
+  "good_messages_processed": 2,
+  "isolation_success": true,
+  "notes": [
+    "Good message 1 processed OK before fault injection.",
+    "Bad command handled gracefully (no crash).",
+    "Good message 2 processed OK after fault injection."
+  ],
+  "_timestamp": "2026-03-06T05:31:08.833916+00:00"
+}

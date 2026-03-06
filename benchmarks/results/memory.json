@@ -1,0 +1,9 @@
+{
+  "baseline_mb": 56.95,
+  "after_1_profile_mb": 56.95,
+  "after_2_profiles_mb": 56.96,
+  "delta_1_profile_mb": 0.0,
+  "delta_2_profiles_mb": 0.01,
+  "headless_enforced_at_2": true,
+  "_timestamp": "2026-03-06T05:31:07.585096+00:00"
+}

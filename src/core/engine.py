@@ -27,6 +27,7 @@ from src.database.session import init_db
 from src.database.repository import OmniRepository
 from src.profiles.manager import ProfileManager
 from src.modes.mode_manager import ModeManager
+from src.core.router import RulesCache                 # BUG 68
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -75,6 +76,7 @@ class OmniKernal:
         self.logger = core_logger.bind(profile=profile_name)
         self.is_running = False
         self._stop_event = asyncio.Event()
+        self._rules_cache = RulesCache()                 # BUG 68: shared cache container
 
     # ------------------------------------------------------------------
     # Internal: session-per-request helper (BUG 62)
@@ -113,7 +115,11 @@ class OmniKernal:
         loader = PluginEngine(self.repository, platform_name=self.adapter.platform_name)
         await loader.discover_and_load()
 
-        self.dispatcher = EventDispatcher(self.repository, logger=self.logger)
+        self.dispatcher = EventDispatcher(
+            self.repository,
+            logger=self.logger,
+            rules_cache=self._rules_cache  # BUG 68
+        )
 
         try:
             await self.adapter.connect()
@@ -139,13 +145,17 @@ class OmniKernal:
             await self.stop()
 
     async def stop(self):
-        """Graceful shutdown."""
-        if not self.is_running:
-            return
-
+        """Graceful shutdown. BUG 67: Always set stop event to abort boot."""
         self.logger.info("Stopping OmniKernal...")
+        was_running = self.is_running
         self.is_running = False
         self._stop_event.set()
+
+        if not was_running:
+            # If we weren't fully started yet, we still want to stop
+            # but we skip mode_manager/adapter cleanup if they aren't ready.
+            self.logger.info("OmniKernal stop() called before full boot. Aborted.")
+            return
 
         # Stop execution mode (Phase 6)
         await self.mode_manager.stop()
@@ -216,9 +226,17 @@ class OmniKernal:
         # Reuse self.dispatcher when the legacy no-session path is taken — this
         # preserves test injection of mock dispatchers.
         if session is not None:
-            dispatcher = EventDispatcher(repo, logger=self.logger)
+            # BUG 68: pass the shared cache to the per-request dispatcher
+            dispatcher = EventDispatcher(
+                repo,
+                logger=self.logger,
+                rules_cache=self._rules_cache
+            )
+            # BUG 66 fix: record failures using a watchdog bound to the fresh repo
+            watchdog = ApiWatchdog(repo)
         else:
             dispatcher = self.dispatcher  # type: ignore[assignment]  # already guarded above
+            watchdog = self.watchdog
 
         # 2. Dispatch & Execute
         start_time = datetime.now(timezone.utc)
@@ -249,10 +267,11 @@ class OmniKernal:
         # BUG 1 fix: was `result.success` — that attribute does not exist; `.ok` is correct
         # BUG 4 fix: record API failure in watchdog when handler reports one
         # BUG 53 fix: use resolved_tool_id (from dispatch) — works for regex routes too
+        # BUG 66 fix: use the isolated watchdog instance
         elif result and not result.ok:
             self.logger.error(f"Command failed: {result.error_reason}")
             if result.api_url and resolved_tool_id is not None:
-                await self.watchdog.record_failure(
+                await watchdog.record_failure(
                     result.api_url, resolved_tool_id, result.error_reason or "unknown"
                 )
             elif result.api_url:
@@ -260,6 +279,6 @@ class OmniKernal:
                 cmd_name = clean_text.split(" ")[0][1:]
                 tool = await repo.get_tool_by_command(cmd_name)
                 if tool:
-                    await self.watchdog.record_failure(
+                    await watchdog.record_failure(
                         result.api_url, tool.id, result.error_reason or "unknown"
                     )

@@ -1,6 +1,6 @@
 commands:
   echo:
     pattern: "!echo <text>"
-    handler: "plugins.echo.handlers.echo.run"
+    handler: "handlers.echo.run"
     description: "Echoes back the input text."
     requires_api: false

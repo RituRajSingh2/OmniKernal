@@ -71,10 +71,16 @@ class EventDispatcher:
     DB-backed in Phase 2. Uses CommandRouter for route resolution (Phase 3).
     """
 
-    def __init__(self, repository: "OmniRepository", logger: Any = None):
+    def __init__(
+        self,
+        repository: "OmniRepository",
+        logger: Any = None,
+        rules_cache: Optional[Any] = None  # BUG 68 (RulesCache)
+    ):
         self.repository = repository
-        # BUG 19 fix: route resolution goes through CommandRouter, not repo directly
-        self.router = CommandRouter(repository)
+        # BUG 19 fix: route resolution goes through CommandRouter
+        # BUG 68 fix: pass the shared cache container
+        self.router = CommandRouter(repository, cache=rules_cache)
         self.logger = logger
 
     async def dispatch(self, sanitized_text: str, user: "User") -> Optional[DispatchResult]:
@@ -118,21 +124,33 @@ class EventDispatcher:
             )
 
         # 4. Execute handler (lazy import)
-        # BUG 42 fix: prefix handler_path with the plugin's root module so
-        # importlib resolves it correctly regardless of sys.path state.
         try:
             raw_handler_path = route["handler_path"]  # e.g. "handlers.echo.run"
             plugin_name = route["plugin_name"]         # e.g. "echo"
 
             # Build absolute dotted path: plugins.echo.handlers.echo
+            # BUG 42 fix: prefix handler_path with the plugin's root module
             full_handler_path = f"plugins.{plugin_name}.{raw_handler_path}"
             module_path, func_name = full_handler_path.rsplit(".", 1)
 
             module = importlib.import_module(module_path)
             handler_func = getattr(module, func_name)
 
+            # BUG 63: If user was elevated via OMNIKERNAL_ADMINS, we must pass
+            # a User object to the context that reflects this role, otherwise
+            # handlers calling ctx.user.is_admin() see 'user'.
+            context_user = user
+            if effective_role != user.role:
+                from src.core.contracts.user import User
+                context_user = User(
+                    id=user.id,
+                    display_name=user.display_name,
+                    platform=user.platform,
+                    role=effective_role
+                )
+
             ctx = CommandContext(
-                user=user,
+                user=context_user,
                 logger=self.logger,
                 _repository=self.repository,
                 _tool_id=route["id"],

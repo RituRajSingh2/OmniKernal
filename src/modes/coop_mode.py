@@ -41,6 +41,8 @@ class CoopMode:
         self._rejected: set[str] = set()
         # BUG 22 fix: track all background tasks so we can cancel on shutdown
         self._active_tasks: set[asyncio.Task] = set()
+        # BUG 64 fix: track IDs mid-processing to prevent duplicate task spawn
+        self._processing_ids: set[str] = set()
 
     @property
     def pending_messages(self) -> list["Message"]:
@@ -122,16 +124,24 @@ class CoopMode:
                     messages = await adapter.fetch_new_messages()
 
                     for msg in messages:
-                        # BUG 48 fix: skip if already awaiting approval for this msg
-                        if msg.id in self._pending:
+                        # BUG 48 + BUG 64 fix: skip if already awaiting approval or spawning
+                        if msg.id in self._pending or msg.id in self._processing_ids:
                             continue
-                        # BUG 22 fix: track task; remove from set when done
+
+                        self._processing_ids.add(msg.id)
+
+                        # Create and track the task
                         task = asyncio.create_task(
                             self._process_with_approval(msg, core),
                             name=f"coop_approval_{msg.id}"
                         )
                         self._active_tasks.add(task)
-                        task.add_done_callback(self._active_tasks.discard)
+                        # Remove from BOTH sets when task finishes
+                        def _cleanup(t, m_id=msg.id):
+                            self._active_tasks.discard(t)
+                            self._processing_ids.discard(m_id)
+
+                        task.add_done_callback(_cleanup)
 
                     await asyncio.sleep(self.poll_interval)
 

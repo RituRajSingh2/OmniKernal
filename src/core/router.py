@@ -23,6 +23,15 @@ from typing import Any, Optional, Sequence
 from src.database.repository import OmniRepository
 
 
+class RulesCache:
+    """
+    Mutable container for cached routing rules (BUG 68).
+    Allows sharing a cache across multiple ephemeral CommandRouter instances.
+    """
+    def __init__(self):
+        self.rules: Optional[Sequence[Any]] = None
+
+
 class CommandRouter:
     """
     Registry for all available commands.
@@ -38,13 +47,31 @@ class CommandRouter:
     invalidate_route_cache() if rules change at runtime.
     """
 
-    def __init__(self, repository: OmniRepository):
+    def __init__(self, repository: OmniRepository, cache: Optional[RulesCache] = None):
         self.repository = repository
-        self._rules_cache: Optional[Sequence[Any]] = None   # BUG 45
+        # BUG 68 fix: use shared cache if provided, else local one
+        self._shared_cache = cache
+        self._local_cache: Optional[Sequence[Any]] = None
+
+    @property
+    def _rules(self) -> Optional[Sequence[Any]]:
+        if self._shared_cache:
+            return self._shared_cache.rules
+        return self._local_cache
+
+    @_rules.setter
+    def _rules(self, value: Sequence[Any]):
+        if self._shared_cache:
+            self._shared_cache.rules = value
+        else:
+            self._local_cache = value
 
     def invalidate_route_cache(self) -> None:
-        """Clears the cached routing rules so they are reloaded on next dispatch."""
-        self._rules_cache = None
+        """Clears the cached routing rules."""
+        if self._shared_cache:
+            self._shared_cache.rules = None
+        else:
+            self._local_cache = None
 
     async def get_route(self, command_trigger: str) -> Optional[dict]:
         """
@@ -62,11 +89,11 @@ class CommandRouter:
             dict with keys: id, command_name, pattern, handler_path, plugin_name
             or None if no route is found.
         """
-        # 1. Load rules (cached after first call) — BUG 45
-        if self._rules_cache is None:
-            self._rules_cache = await self.repository.get_all_routing_rules()
+        # 1. Load rules (cached after first call)
+        if self._rules is None:
+            self._rules = await self.repository.get_all_routing_rules()
 
-        for rule in self._rules_cache:
+        for rule in self._rules:
             try:
                 if re.fullmatch(rule.regex_pattern, command_trigger):
                     # Resolve the tool this rule maps to

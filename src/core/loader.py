@@ -10,6 +10,14 @@ manifests formally, instead of raw dict access.
 BUG 34 fix: Now enforces min_core_version — plugins that require a higher
 core version than the currently running OMNIKERNAL_VERSION are rejected
 at load time with a clear log message.
+
+BUG 57 fix: Warns when a command_name from one plugin would overwrite a
+command_name already registered by a different plugin, so admins know which
+plugin "won" the collision.
+
+BUG 58 fix: PluginEngine now accepts the running platform_name and skips
+(or marks inactive) plugins that don't support the current platform. This
+prevents polluting the DB with tools that can never execute.
 """
 
 import os
@@ -37,11 +45,24 @@ def _version_tuple(v: str) -> tuple[int, ...]:
 class PluginEngine:
     """
     Main orchestrator for Phase 3 plugin lifecycle.
+
+    Args:
+        repo:          The OmniRepository to register plugins/tools into.
+        plugins_dir:   Directory to scan for plugin folders.
+        platform_name: BUG 58 — running platform identifier (e.g. 'whatsapp').
+                       Plugins that don't list this platform (or 'any') are skipped.
+                       Pass None to disable platform filtering (all plugins load).
     """
 
-    def __init__(self, repo: "OmniRepository", plugins_dir: str = "plugins"):
+    def __init__(
+        self,
+        repo: "OmniRepository",
+        plugins_dir: str = "plugins",
+        platform_name: Optional[str] = None,
+    ):
         self.repo = repo
         self.plugins_dir = plugins_dir
+        self.platform_name = platform_name   # BUG 58
         self.logger = core_logger.bind(subsystem="plugin_engine")
 
     async def discover_and_load(self):
@@ -91,6 +112,14 @@ class PluginEngine:
                     )
                     return
 
+            # BUG 58 fix: skip plugins incompatible with the active platform
+            if self.platform_name and not manifest.supports_platform(self.platform_name):
+                self.logger.info(
+                    f"Plugin '{manifest.name}' does not support platform "
+                    f"'{self.platform_name}' (supports {manifest.platform}). Skipping."
+                )
+                return
+
             # 2. Register Plugin in DB
             await self.repo.register_plugin(
                 name=manifest.name,
@@ -106,6 +135,16 @@ class PluginEngine:
 
                 commands = cmd_cfg.get("commands", {})
                 for cmd_name, cmd_info in commands.items():
+                    # BUG 57 fix: warn if an existing tool with this name belongs
+                    # to a different plugin (silent overwrite is a footgun).
+                    existing = await self.repo.get_tool_by_command(cmd_name)
+                    if existing and existing.plugin_name != manifest.name:
+                        self.logger.warning(
+                            f"Command name conflict: '{cmd_name}' is already registered "
+                            f"by plugin '{existing.plugin_name}'. "
+                            f"Plugin '{manifest.name}' will overwrite it."
+                        )
+
                     await self.repo.register_tool(
                         command_name=cmd_name,
                         pattern=cmd_info.get("pattern"),

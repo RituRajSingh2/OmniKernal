@@ -7,6 +7,10 @@ the entire test module to crash on import. Rewritten to:
   - Use process() unit-test (no full boot needed)
   - Use proper AsyncMock for all dependencies
   - Use correct datetime.now(timezone.utc) for Message timestamps
+
+BUG 53 fix: engine tests updated — dispatcher.dispatch() now returns a
+DispatchResult namedtuple instead of a bare CommandResult. Tests that
+inject a mock dispatcher must now return DispatchResult instances.
 """
 
 import pytest
@@ -15,6 +19,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 from src.core.engine import OmniKernal
+from src.core.dispatcher import DispatchResult
 from src.core.contracts.message import Message
 from src.core.contracts.user import User
 from src.core.contracts.command_result import CommandResult
@@ -27,6 +32,23 @@ def _make_msg(text: str = "!echo hello integration", user_id: str = "user1") -> 
         user=User(id=user_id, display_name="Test User", platform="mock"),
         timestamp=datetime.now(timezone.utc),
         platform="mock"
+    )
+
+
+def _dispatch_ok(reply: str | None = None, tool_id: int = 1, cmd: str = "echo") -> DispatchResult:
+    """Helper: build a DispatchResult as dispatch() now returns."""
+    return DispatchResult(
+        result=CommandResult.success(reply=reply),
+        tool_id=tool_id,
+        command_name=cmd,
+    )
+
+
+def _dispatch_err(reason: str, tool_id: int = 1, cmd: str = "echo") -> DispatchResult:
+    return DispatchResult(
+        result=CommandResult.error(reason),
+        tool_id=tool_id,
+        command_name=cmd,
     )
 
 
@@ -45,8 +67,9 @@ async def test_engine_process_sends_reply():
     engine.is_running = True
 
     # Inject a pre-built dispatcher so we don't need a DB
+    # BUG 53 fix: dispatch() now returns DispatchResult, not bare CommandResult
     mock_dispatcher = AsyncMock()
-    mock_dispatcher.dispatch.return_value = CommandResult.success(reply="Echo: hello integration")
+    mock_dispatcher.dispatch.return_value = _dispatch_ok(reply="Echo: hello integration")
     engine.dispatcher = mock_dispatcher
 
     await engine.process(_make_msg("!echo hello integration"))
@@ -67,7 +90,7 @@ async def test_engine_process_no_reply_skips_send():
     engine.is_running = True
 
     mock_dispatcher = AsyncMock()
-    mock_dispatcher.dispatch.return_value = CommandResult.success(reply=None)
+    mock_dispatcher.dispatch.return_value = _dispatch_ok(reply=None)
     engine.dispatcher = mock_dispatcher
 
     await engine.process(_make_msg("!silent"))

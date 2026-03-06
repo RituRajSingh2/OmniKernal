@@ -54,23 +54,34 @@ class CommandContext:
         """
         Retrieve and decrypt an API key for the given service.
 
+        BUG 55 fix: The `service` argument was previously accepted but silently
+        ignored. It is now used as a human-readable label in error messages and
+        debug logging, improving traceability. All API keys are stored per-tool
+        (one key per tool_id) — if a future multi-key schema is added, this arg
+        will become the lookup key. For now it is a required label that must
+        match the service name declared in commands.yaml.
+
         Args:
-            service: Service name as declared in plugin's commands.yaml
-                     (e.g. 'youtube', 'openai').
+            service: Descriptive service name (e.g. 'youtube', 'openai').
+                     Used in error messages. Must be non-empty.
 
         Returns:
             Decrypted plaintext API key — only in handler scope, never logged.
 
         Raises:
-            ValueError: If no API key is found for this tool or decryption fails.
+            ValueError: If no API key is configured for this tool.
+            RuntimeError: If the context is not fully initialised.
         """
+        if not service:
+            raise ValueError("get_api_key() requires a non-empty service name.")
         if not self._repository or not self._tool_id:
             raise RuntimeError("Repository or tool_id not configured in CommandContext.")
 
         encrypted_key = await self._repository.get_api_key(self._tool_id)
         if not encrypted_key:
             raise ValueError(
-                f"No API key found configured for tool '{service}' (tool_id={self._tool_id})"
+                f"No API key configured for service '{service}' (tool_id={self._tool_id}). "
+                "Register it via OmniRepository.register_tool_requirement()."
             )
 
         # BUG 35 fix: use injected decrypter if provided (no circular import)

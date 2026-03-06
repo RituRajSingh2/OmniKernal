@@ -1,3 +1,20 @@
+"""
+OmniKernal — Core Engine Lifecycle
+
+Orchestrates the full boot/shutdown sequence and the message processing
+pipeline (sanitize → dispatch → log → reply).
+
+BUG 62 fix: OmniKernal now accepts `session_factory` (an async_sessionmaker)
+in addition to a top-level `repository`. A fresh OmniRepository is created
+*per process() call*, preventing concurrent CoopMode tasks from racing on a
+shared AsyncSession and causing SQLAlchemy IllegalStateError.
+
+BUG 53 fix: EventDispatcher.dispatch() now returns a DispatchResult namedtuple
+that includes the resolved tool_id. This lets the engine feed the correct id to
+ApiWatchdog for regex-triggered commands (previously, the engine tried to
+resolve the tool by the raw user trigger, which missed regex routes).
+"""
+
 import asyncio
 from typing import TYPE_CHECKING, Optional
 from datetime import datetime, timezone
@@ -7,12 +24,13 @@ from src.security.watchdog import ApiWatchdog          # BUG 4: was missing
 from src.core.dispatcher import EventDispatcher
 from src.core.loader import PluginEngine
 from src.database.session import init_db
+from src.database.repository import OmniRepository
 from src.profiles.manager import ProfileManager
 from src.modes.mode_manager import ModeManager
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
     from src.core.interfaces.platform_adapter import PlatformAdapter
-    from src.database.repository import OmniRepository
     from src.core.contracts.message import Message
     from src.core.contracts.user import User
 
@@ -20,6 +38,19 @@ class OmniKernal:
     """
     The beating heart of OmniKernal.
     Platform-agnostic and logic-agnostic.
+
+    Args:
+        adapter:         The platform adapter to use.
+        repository:      A top-level OmniRepository used for boot-time DB ops
+                         (plugin registration, profile activation). NOT used for
+                         per-message processing.
+        session_factory: BUG 62 fix — an async_sessionmaker. If supplied, a fresh
+                         OmniRepository is created for each process() call, avoiding
+                         session contention in CoopMode. If None, falls back to
+                         sharing `repository` (legacy behaviour, single-threaded only).
+        profile_name:    Profile directory name to activate on boot.
+        profiles_dir:    Root directory containing profile folders.
+        mode:            "self" (autonomous) or "coop" (human-in-loop).
     """
 
     def __init__(
@@ -29,9 +60,11 @@ class OmniKernal:
         profile_name: str = "main",
         profiles_dir: str = "profiles",
         mode: str = "self",
+        session_factory: Optional["async_sessionmaker"] = None,
     ):
         self.adapter = adapter
         self.repository = repository
+        self._session_factory = session_factory                     # BUG 62
         self.profile_name = profile_name
         self.mode = mode
         self.profile_manager = ProfileManager(profiles_dir)
@@ -42,6 +75,18 @@ class OmniKernal:
         self.logger = core_logger.bind(profile=profile_name)
         self.is_running = False
         self._stop_event = asyncio.Event()
+
+    # ------------------------------------------------------------------
+    # Internal: session-per-request helper (BUG 62)
+    # ------------------------------------------------------------------
+
+    def _make_repo(self, session) -> "OmniRepository":
+        """Return a fresh repository bound to *session*."""
+        return OmniRepository(session)
+
+    # ------------------------------------------------------------------
+    # Boot / Shutdown
+    # ------------------------------------------------------------------
 
     async def start(self):
         """Boot sequence."""
@@ -65,7 +110,7 @@ class OmniKernal:
         )
 
         # Plugin Discovery (Phase 3)
-        loader = PluginEngine(self.repository)
+        loader = PluginEngine(self.repository, platform_name=self.adapter.platform_name)
         await loader.discover_and_load()
 
         self.dispatcher = EventDispatcher(self.repository, logger=self.logger)
@@ -115,8 +160,18 @@ class OmniKernal:
 
         self.logger.info("Shutdown complete.")
 
+    # ------------------------------------------------------------------
+    # Message Processing
+    # ------------------------------------------------------------------
+
     async def process(self, msg: "Message") -> None:
-        """Public processing pipeline — called by SelfMode and CoopMode."""
+        """Public processing pipeline — called by SelfMode and CoopMode.
+
+        BUG 62 fix: If a session_factory was supplied, we create a brand-new
+        session (and repository) for this call. CoopMode can therefore invoke
+        process() concurrently for multiple approved messages without two tasks
+        sharing the same AsyncSession.
+        """
 
         # BUG 12: guard against dispatcher not yet initialised (race in early stop())
         if self.dispatcher is None:
@@ -131,21 +186,55 @@ class OmniKernal:
         if not clean_text or not clean_text.startswith("!"):
             return
 
+        # 2. Get a per-request session/repo (BUG 62 fix)
+        if self._session_factory is not None:
+            async with self._session_factory() as session:
+                await self._process_with_session(clean_text, msg, session)
+        else:
+            # Fallback: legacy shared repo (safe for SelfMode / sequential flows)
+            await self._process_with_session(clean_text, msg, repo=self.repository)
+
+    async def _process_with_session(
+        self,
+        clean_text: str,
+        msg: "Message",
+        session=None,
+        repo: Optional["OmniRepository"] = None,
+    ) -> None:
+        """Core pipeline using either a fresh session or an existing repo.
+
+        When session_factory is used (BUG 62 path), we create a new dispatcher
+        bound to the fresh session's repo. For the legacy path (no session_factory),
+        we re-use self.dispatcher which may have been injected by tests or set
+        at boot time.
+        """
+
+        if repo is None:
+            repo = self._make_repo(session)
+
+        # Use a fresh dispatcher when we have a fresh repo (BUG 62 session path).
+        # Reuse self.dispatcher when the legacy no-session path is taken — this
+        # preserves test injection of mock dispatchers.
+        if session is not None:
+            dispatcher = EventDispatcher(repo, logger=self.logger)
+        else:
+            dispatcher = self.dispatcher  # type: ignore[assignment]  # already guarded above
+
         # 2. Dispatch & Execute
         start_time = datetime.now(timezone.utc)
-        result = await self.dispatcher.dispatch(clean_text, msg.user)
+        dispatch_result = await dispatcher.dispatch(clean_text, msg.user)
         duration_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
 
-        # 3. Log Execution to DB
-        # BUG 47 fix: log the command trigger from the text (the route lookup
-        # is inside dispatcher and not returned here; the raw trigger is correct
-        # for the audit log as the resolved command_name is the same for exact-match
-        # routes, and for regex routes it at least captures what the user sent).
+        result = dispatch_result.result if dispatch_result else None
+        resolved_tool_id = dispatch_result.tool_id if dispatch_result else None
+
+        # 3. Log Execution to DB (BUG 47/53: use resolved command_name if available)
         if result:
-            await self.repository.log_execution(
+            logged_cmd = dispatch_result.command_name or clean_text.split(" ")[0][1:]
+            await repo.log_execution(
                 user_id=msg.user.id,
                 platform=msg.platform,
-                command_name=clean_text.split(" ")[0][1:],
+                command_name=logged_cmd,
                 raw_input=msg.raw_text,
                 success=result.ok,
                 response_time_ms=duration_ms,
@@ -159,11 +248,17 @@ class OmniKernal:
 
         # BUG 1 fix: was `result.success` — that attribute does not exist; `.ok` is correct
         # BUG 4 fix: record API failure in watchdog when handler reports one
+        # BUG 53 fix: use resolved_tool_id (from dispatch) — works for regex routes too
         elif result and not result.ok:
             self.logger.error(f"Command failed: {result.error_reason}")
-            if result.api_url:
+            if result.api_url and resolved_tool_id is not None:
+                await self.watchdog.record_failure(
+                    result.api_url, resolved_tool_id, result.error_reason or "unknown"
+                )
+            elif result.api_url:
+                # Fallback: best-effort lookup by trigger text (exact routes only)
                 cmd_name = clean_text.split(" ")[0][1:]
-                tool = await self.repository.get_tool_by_command(cmd_name)
+                tool = await repo.get_tool_by_command(cmd_name)
                 if tool:
                     await self.watchdog.record_failure(
                         result.api_url, tool.id, result.error_reason or "unknown"

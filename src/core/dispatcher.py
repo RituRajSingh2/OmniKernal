@@ -16,11 +16,16 @@ elevation) instead of user.role (original frozen field).
 BUG 42 fix: Handler import path is prefixed with the plugin root module
 (plugins.<plugin_name>.) so importlib resolves handlers correctly for
 all plugins, not just echo which happened to be a top-level package.
+
+BUG 53 fix: dispatch() now returns a DispatchResult namedtuple that carries
+both the CommandResult AND the resolved tool_id and command_name. This lets
+the engine record the correct watchdog failure even when the route was matched
+via a regex rule (where the trigger doesn't equal the canonical command name).
 """
 
 import os
 import importlib
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 from src.core.router import CommandRouter                         # BUG 19
 from src.core.parser import CommandParser
 from src.core.permissions import PermissionValidator
@@ -40,6 +45,14 @@ _ADMIN_IDS: frozenset[str] = frozenset(
     for uid in os.getenv("OMNIKERNAL_ADMINS", "").split(",")
     if uid.strip()
 )
+
+
+# BUG 53 fix: structured return value carrying route metadata alongside the
+# CommandResult. Lets callers (engine) know which tool was actually executed.
+class DispatchResult(NamedTuple):
+    result: Optional[CommandResult]
+    tool_id: Optional[int]        # resolved tool PK (works for regex routes)
+    command_name: Optional[str]   # canonical command name (for audit logging)
 
 
 def _resolve_role(user: "User") -> str:
@@ -64,7 +77,17 @@ class EventDispatcher:
         self.router = CommandRouter(repository)
         self.logger = logger
 
-    async def dispatch(self, sanitized_text: str, user: "User") -> Optional[CommandResult]:
+    async def dispatch(self, sanitized_text: str, user: "User") -> Optional[DispatchResult]:
+        """
+        Dispatches a sanitized command string.
+
+        Returns:
+            DispatchResult(result, tool_id, command_name) on a matched route, or
+            None if the text doesn't start with '!' or no route is found.
+
+        BUG 53 fix: tool_id is taken directly from the resolved route dict so
+        that regex-triggered routes return the correct id to the caller.
+        """
         if not sanitized_text.startswith("!"):
             return None
 
@@ -79,12 +102,20 @@ class EventDispatcher:
         # 2. BUG 39 fix: resolve effective role, then check that directly
         effective_role = _resolve_role(user)
         if not PermissionValidator.check_role(effective_role, required_role="user"):
-            return CommandResult.error("Permission denied")
+            return DispatchResult(
+                result=CommandResult.error("Permission denied"),
+                tool_id=route["id"],
+                command_name=route["command_name"],
+            )
 
         # 3. Parse arguments using the pattern from the route
         args = CommandParser.match(sanitized_text, route["pattern"])
         if args is None:
-            return CommandResult.error(f"Usage: {route['pattern']}")
+            return DispatchResult(
+                result=CommandResult.error(f"Usage: {route['pattern']}"),
+                tool_id=route["id"],
+                command_name=route["command_name"],
+            )
 
         # 4. Execute handler (lazy import)
         # BUG 42 fix: prefix handler_path with the plugin's root module so
@@ -108,8 +139,16 @@ class EventDispatcher:
                 _decrypter=EncryptionEngine.decrypt,  # BUG 35 fix
             )
             result = await handler_func(args, ctx)
-            return result
+            return DispatchResult(
+                result=result,
+                tool_id=route["id"],
+                command_name=route["command_name"],
+            )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Dispatcher error executing {command_trigger}: {e}")
-            return CommandResult.error(f"Execution failed: {str(e)}")
+            return DispatchResult(
+                result=CommandResult.error(f"Execution failed: {str(e)}"),
+                tool_id=route["id"],
+                command_name=route["command_name"],
+            )

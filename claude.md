@@ -21,7 +21,7 @@ Ph3  Plugin Layer (v1)            ✅
 Ph4  Platform Adapter Layer       ✅ (scaffold)
 Ph5  Profile Management           ✅
 Ph6  Execution Modes (Self/Coop)  ✅
-Ph7  Benchmarks                   🔄 (harness exists)
+Ph7  Research & Benchmarking      🔄 (Comparative transport analysis)
 Ph8  Future (Redis, multi-node)   ❌ deferred
 ```
 
@@ -328,8 +328,17 @@ async def run(args, ctx): return CommandResult.success(reply=args["text"])
 - **Multi-key API (BUG 55 deferred):** `ctx.get_api_key(service)` looks up only the single key stored per `tool_id`. Supporting multiple distinct API keys per tool (e.g. a tool that calls both YouTube and OpenAI) is a Phase 8 design task.
 - **Lock Cleanup (BUG 61 ✅ fixed):** `ProfileLock.is_locked` now calls `os.remove` directly for stale locks from dead processes, bypassing ownership check in `release()`.
 
+## RESEARCH & ANALYSIS PROTOCOL
+To maintain architectural evaluation integrity across sessions:
+1. **Raw Data:** Save metrics (latency, RAM) to `benchmarks/results_matrix.json`.
+2. **Analysis:** Document comparative findings in `docs/research/comparative_analysis.md`.
+3. **Intent:** Evaluates **UI-based (Playwright)** vs **API-based (WAHA)** vs **Socket-based (Baileys)**.
+
 ## WHAT IS NOT YET BUILT
-- WhatsApp Playwright adapter DOM logic (scaffold only)
+- WhatsApp Playwright adapter logic (Finalizing high-level mapping)
+- WAHA (HTTP API) adapter pack (Phase 7 Research Target)
+- Baileys (Socket) adapter pack (Phase 7 Research Target)
+- Comparative Performance Matrix (Phase 7 Research)
 - Rate limiting enforcement (declared in `permissions.json`, not wired)
 - Named services in `ctx.get_api_key(service)` (BUG 55 — currently ignores `service` arg)
 - Hot-reload of plugins

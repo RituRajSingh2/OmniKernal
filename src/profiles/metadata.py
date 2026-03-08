@@ -16,6 +16,7 @@ The safe pattern is:
 import json
 import os
 from datetime import UTC, datetime
+from typing import Any
 
 from src.core.logger import core_logger
 from src.security.encryption import EncryptionEngine
@@ -55,7 +56,7 @@ class ProfileMetadata:
     def _metadata_path(self, profile_name: str) -> str:
         return os.path.join(self.profiles_dir, profile_name, "metadata.json")
 
-    def save(self, profile_name: str, data: dict) -> None:
+    def save(self, profile_name: str, data: dict[str, Any]) -> None:
         """
         Saves profile metadata, encrypting sensitive fields.
 
@@ -71,7 +72,7 @@ class ProfileMetadata:
         which is correct). The dangerous case is keeping raw ciphertext in a dict
         and passing it here — that will double-encrypt.
         """
-        encrypted_data = dict(data)
+        encrypted_data: dict[str, Any] = dict(data)
 
         for field in SENSITIVE_FIELDS:
             if field in encrypted_data and encrypted_data[field]:
@@ -85,9 +86,14 @@ class ProfileMetadata:
 
         self.logger.debug(f"Metadata saved for '{profile_name}'.")
 
-    def load(self, profile_name: str) -> dict | None:
+    def load(self, profile_name: str, decrypt: bool = True) -> dict[str, Any] | None:
         """
-        Loads and decrypts profile metadata.
+        Loads and potentially decrypts profile metadata.
+
+        Args:
+            profile_name: Profile directory name.
+            decrypt:      BUG 80 fix: set to False to skip decryption;
+                          useful for lists/checks when secret key is unknown.
 
         BUG 51 fix: previously, a failed decryption silently set the field to
         None. If the caller then did `save(load(name))`, the original ciphertext
@@ -108,26 +114,27 @@ class ProfileMetadata:
             return None
 
         with open(meta_path, encoding="utf-8") as f:
-            data = json.load(f)
+            data: dict[str, Any] = json.load(f)
 
         # Decrypt sensitive fields
-        for field in SENSITIVE_FIELDS:
-            if field in data and data[field]:
-                try:
-                    data[field] = EncryptionEngine.decrypt(data[field])
-                except Exception as e:
-                    self.logger.error(
-                        f"Cannot decrypt '{field}' for profile '{profile_name}'. "
-                        f"Key mismatch or corrupted data. Original ciphertext preserved."
-                    )
-                    raise RuntimeError(
-                        f"Profile '{profile_name}': failed to decrypt '{field}'. "
-                        "Ensure OMNIKERNAL_SECRET_KEY matches the key used when this profile was created."
-                    ) from e
+        if decrypt:
+            for field in SENSITIVE_FIELDS:
+                if field in data and data[field]:
+                    try:
+                        data[field] = EncryptionEngine.decrypt(data[field])
+                    except Exception as e:
+                        self.logger.error(
+                            f"Cannot decrypt '{field}' for profile '{profile_name}'. "
+                            f"Key mismatch or corrupted data. Original ciphertext preserved."
+                        )
+                        raise RuntimeError(
+                            f"Profile '{profile_name}': failed to decrypt '{field}'. "
+                            "Ensure OMNIKERNAL_SECRET_KEY matches the key used when this profile was created."
+                        ) from e
 
         return data
 
-    def create_default(self, profile_name: str, platform: str) -> dict:
+    def create_default(self, profile_name: str, platform: str) -> dict[str, Any]:
         """Creates and saves a default metadata.json for a new profile."""
         data = {
             "name": profile_name,

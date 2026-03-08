@@ -77,10 +77,11 @@ class CommandContext:
         """
         if not service:
             raise ValueError("get_api_key() requires a non-empty service name.")
-        if not self._repository or not self._tool_id:
+        if not self._repository or self._tool_id is None:
             raise RuntimeError("Repository or tool_id not configured in CommandContext.")
 
-        encrypted_key = await self._repository.get_api_key(self._tool_id)
+        # BUG 181 fix: Pass the service name to the repository
+        encrypted_key = await self._repository.get_api_key(self._tool_id, service=service)
         if not encrypted_key:
             raise ValueError(
                 f"No API key configured for service '{service}' (tool_id={self._tool_id}). "
@@ -91,8 +92,6 @@ class CommandContext:
         if self._decrypter is not None:
             return self._decrypter(encrypted_key)
 
-        # Fallback: late import kept as a last resort so callers that haven't
-        # been updated to inject _decrypter yet continue to work.
         from src.security.encryption import EncryptionEngine  # noqa: PLC0415
         return EncryptionEngine.decrypt(encrypted_key)
 

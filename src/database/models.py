@@ -7,7 +7,7 @@ and security watchdog (API health).
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -41,7 +41,8 @@ class Tool(Base):
     command_name: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     pattern: Mapped[str] = mapped_column(String(255))
     handler_path: Mapped[str] = mapped_column(String(255)) # e.g. "plugins.echo.handlers.echo"
-    plugin_name: Mapped[str] = mapped_column(ForeignKey("plugins.name"))
+    plugin_name: Mapped[str] = mapped_column(ForeignKey("plugins.name", ondelete="CASCADE"))
+    required_role: Mapped[str] = mapped_column(String(20), default="user") # BUG 71
 
     # Metadata
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -59,8 +60,11 @@ class RoutingRule(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     regex_pattern: Mapped[str] = mapped_column(String(255), unique=True)
-    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id"))
+    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id", ondelete="CASCADE"))
     priority: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Relationships
+    tool: Mapped["Tool"] = relationship() # BUG 70
 
 class ExecutionLog(Base):
     """
@@ -84,7 +88,8 @@ class ApiHealth(Base):
     """
     __tablename__ = "api_health"
 
-    url: Mapped[str] = mapped_column(String(255), primary_key=True)
+    # BUG 127 fix: use Text for URLs to prevent length limitations
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     last_success: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_failure: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -98,8 +103,8 @@ class DeadApi(Base):
     __tablename__ = "dead_apis"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    api_url: Mapped[str] = mapped_column(String(255), index=True)
-    tool_id: Mapped[int | None] = mapped_column(ForeignKey("tools.id"), nullable=True)
+    api_url: Mapped[str] = mapped_column(Text, index=True) # BUG 127
+    tool_id: Mapped[int | None] = mapped_column(ForeignKey("tools.id", ondelete="SET NULL"), nullable=True) # BUG 125
     error_count: Mapped[int] = mapped_column(Integer)
     killed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     kill_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -112,5 +117,11 @@ class ToolRequirement(Base):
     __tablename__ = "tool_requirements"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id"), unique=True)
+    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id", ondelete="CASCADE"), index=True)
+    service: Mapped[str] = mapped_column(String(50), default="default", index=True) # BUG 181
     api_key_value: Mapped[str] = mapped_column(Text) # Stored ENCRYPTED
+
+    # BUG 181: allow one key per service per tool
+    __table_args__ = (
+        UniqueConstraint("tool_id", "service", name="uq_tool_service"),
+    )

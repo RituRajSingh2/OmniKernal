@@ -17,37 +17,40 @@ if TYPE_CHECKING:
 
 class PermissionValidator:
     """
-    Validates execution rights.
+    Checks if a user has sufficient roles or permissions to execute a command.
     """
 
-    @classmethod
-    def check_permission(cls, user: "User", required_role: str = "user") -> bool:
-        """
-        Simple role check using the user's original frozen role field.
-        'admin' role can do everything. 'user' role can do 'user' level commands.
-
-        Note: This compares user.role (the frozen original field). For admin-
-        elevated users resolved via OMNIKERNAL_ADMINS, use check_role() with
-        the effective_role string so that elevation is actually enforced.
-        """
-        if user.role == "admin":
-            return True
-        return user.role == required_role
+    ROLE_LEVELS = {
+        "any": 0,
+        "user": 10,
+        "mod": 50,
+        "admin": 100
+    }
 
     @classmethod
     def check_role(cls, effective_role: str, required_role: str = "user") -> bool:
         """
-        BUG 39 fix: Checks a pre-resolved effective role string against the
-        required role. Use this when the caller has already resolved the
-        effective role (e.g. after OMNIKERNAL_ADMINS elevation).
+        Hierarchical RBAC check (BUG 74 fix).
+        Checks if the user's role level is >= the required role level.
 
         Args:
-            effective_role: The resolved role string (e.g. 'admin' or 'user').
-            required_role:  Minimum role required to execute. Default 'user'.
+            effective_role: The resolved role string (e.g. 'admin', 'mod', 'user').
+            required_role:  Minimum role required (default 'user').
 
         Returns:
-            True if effective_role grants the required access level.
+            True if user role meets or exceeds required level.
         """
-        if effective_role == "admin":
-            return True
-        return effective_role == required_role
+        # BUG 165 fix: Fail-closed on unrecognized roles.
+        # If 'required_role' is misspelled, default to level 100 (admin).
+        # This prevents typo-ing 'adm1n' and accidentally opening it to 'user'.
+        # BUG 165 + BUG 173 fix: Fail-closed on unrecognized roles.
+        # Maps common synonyms to internal levels to prevent accidental lockout.
+        LEVEL_SYNONYMS = {"owner": "admin", "superuser": "admin", "administrator": "admin"}
+        # BUG 281: normalize to lowercase for robust dictionary lookup
+        mapped_user = LEVEL_SYNONYMS.get(effective_role.lower(), effective_role.lower())
+        mapped_req = LEVEL_SYNONYMS.get(required_role.lower(), required_role.lower())
+
+        user_lvl = cls.ROLE_LEVELS.get(mapped_user, 0)
+        req_lvl = cls.ROLE_LEVELS.get(mapped_req, 100) # Default to 100 (admin)
+
+        return user_lvl >= req_lvl

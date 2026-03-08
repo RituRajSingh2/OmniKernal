@@ -31,10 +31,10 @@ class ModeManager:
         await manager.stop()
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._active_mode_name: ModeName | None = None
         self._active_mode: SelfMode | CoopMode | None = None
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self.logger = core_logger.bind(subsystem="mode_manager")
 
     @property

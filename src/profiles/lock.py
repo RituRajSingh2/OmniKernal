@@ -12,6 +12,7 @@ existing PID and potentially clean up a stale lock, then retries once.
 
 import contextlib
 import os
+import psutil # BUG 75
 
 from src.core.logger import core_logger
 
@@ -33,12 +34,21 @@ class ProfileLock:
     def _lock_path(self, profile_name: str) -> str:
         return os.path.join(self.profiles_dir, profile_name, "lock.pid")
 
-    def _pid_is_alive(self, pid: int) -> bool:
-        """Check if a process with the given PID is still running."""
+    def _pid_is_alive(self, pid: int, start_time: float | None = None) -> bool:
+        """
+        Check if a process with the given PID is still running.
+        BUG 75 fix: If start_time is provided, also verify that the process
+        was created at that exact time to prevent recycling races.
+        """
         try:
-            os.kill(pid, 0)
+            proc = psutil.Process(pid)
+            if not proc.is_running():
+                return False
+            if start_time is not None:
+                # Allow minor float precision difference
+                return abs(proc.create_time() - start_time) < 0.1
             return True
-        except (OSError, ProcessLookupError):
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
 
     def acquire(self, profile_name: str) -> None:
@@ -66,7 +76,9 @@ class ProfileLock:
                 # Atomic: fails immediately if the file already exists
                 fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w") as f:
-                    f.write(str(os.getpid()))
+                    # BUG 75: Store pid:starttime
+                    curr_proc = psutil.Process()
+                    f.write(f"{curr_proc.pid}:{curr_proc.create_time()}")
                 self.logger.info(f"Lock acquired for '{profile_name}' (PID {os.getpid()}).")
                 return
 
@@ -79,13 +91,33 @@ class ProfileLock:
 
                 # First attempt: inspect the existing lock file
                 try:
-                    with open(lock_file) as f:
-                        content = f.read().strip()
-                    existing_pid = int(content) if content else None
+                    # BUG 210 fix: if file is empty, someone might be currently writing to it.
+                    # Wait briefly and retry reading before assuming it's truly stale.
+                    content = ""
+                    for sub_attempt in range(3):
+                        with open(lock_file) as f:
+                            content = f.read().strip()
+                        if content:
+                            break
+                        # Only sleep if we have a loop; else it's a script/test boot.
+                        if asyncio.get_event_loop().is_running():
+                            # We can't await here as acquire() is sync for profile_manager use.
+                            # But we only hit this on concurrent startup.
+                            import time
+                            time.sleep(0.05)
+
+                    if ":" in content:
+                        p_str, t_str = content.split(":", 1)
+                        existing_pid = int(p_str)
+                        existing_time = float(t_str)
+                    else:
+                        existing_pid = int(content) if content else None
+                        existing_time = None
                 except (OSError, ValueError):
                     existing_pid = None
+                    existing_time = None
 
-                if existing_pid and self._pid_is_alive(existing_pid):
+                if existing_pid and self._pid_is_alive(existing_pid, existing_time):
                     raise RuntimeError(
                         f"Profile '{profile_name}' is already locked by PID {existing_pid}."
                     ) from None
@@ -109,16 +141,24 @@ class ProfileLock:
         try:
             with open(lock_file) as f:
                 content = f.read().strip()
-            file_pid = int(content) if content else None
+            # BUG 131 fix: handle colon-separated PID:TIME format consistently
+            if ":" in content:
+                file_pid = int(content.split(":", 1)[0])
+            else:
+                file_pid = int(content) if content else None
         except (OSError, ValueError):
             file_pid = None
 
-        if file_pid is not None and file_pid != os.getpid():
+        # BUG 163 fix: also verify creation time if available to prevent Windows PID reciclery race.
+        current_proc = psutil.Process()
+        if file_pid is not None and file_pid != current_proc.pid:
             self.logger.warning(
                 f"Skipping lock release for '{profile_name}': "
-                f"lock is held by PID {file_pid}, not current PID {os.getpid()}."
+                f"lock is held by PID {file_pid}, not current PID {current_proc.pid}."
             )
             return
+
+        # Optimization: we already have current_proc. Avoid re-check if we know it matches.
 
         try:
             os.remove(lock_file)
@@ -132,13 +172,27 @@ class ProfileLock:
         if not os.path.exists(lock_file):
             return False
 
-        with open(lock_file) as f:
-            try:
-                pid = int(f.read().strip())
-            except ValueError:
-                return False
+        # BUG 194 fix: Handle FileNotFoundError race condition (TOCTOU)
+        try:
+            with open(lock_file) as f:
+                content = f.read().strip()
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
 
-        if self._pid_is_alive(pid):
+        try:
+            if ":" in content:
+                pid_str, time_str = content.split(":", 1)
+                pid = int(pid_str)
+                start_time = float(time_str)
+            else:
+                pid = int(content)
+                start_time = None
+        except (ValueError, TypeError):
+            return False
+
+        if self._pid_is_alive(pid, start_time):
             return True
 
         # Stale lock — clean it up

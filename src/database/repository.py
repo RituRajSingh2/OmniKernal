@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload  # BUG 70
 
 from .models import ApiHealth, DeadApi, ExecutionLog, Plugin, RoutingRule, Tool, ToolRequirement
 
@@ -24,7 +25,7 @@ class OmniRepository:
 
     # --- Plugin & Tool Registry ---
 
-    async def register_plugin(self, name: str, version: str, author_name: str | None = None, description: str | None = None):
+    async def register_plugin(self, name: str, version: str, author_name: str | None = None, description: str | None = None) -> None:
         """
         Registers or updates a plugin entry.
 
@@ -50,7 +51,15 @@ class OmniRepository:
             self.session.add(plugin)
         await self.session.commit()
 
-    async def register_tool(self, command_name: str, pattern: str, handler_path: str, plugin_name: str, description: str | None = None):
+    async def register_tool(
+        self,
+        command_name: str,
+        pattern: str,
+        handler_path: str,
+        plugin_name: str,
+        description: str | None = None,
+        required_role: str = "user"  # BUG 71
+    ) -> None:
         """Registers or updates a tool entry."""
         existing = await self.get_tool_by_command(command_name)
         if existing:
@@ -59,6 +68,7 @@ class OmniRepository:
             existing.handler_path = handler_path
             existing.description = description
             existing.plugin_name = plugin_name   # was missing
+            existing.required_role = required_role # BUG 71
             await self.session.flush()           # make intent explicit
         else:
             tool = Tool(
@@ -66,7 +76,8 @@ class OmniRepository:
                 pattern=pattern,
                 handler_path=handler_path,
                 plugin_name=plugin_name,
-                description=description
+                description=description,
+                required_role=required_role # BUG 71
             )
             self.session.add(tool)
 
@@ -92,18 +103,32 @@ class OmniRepository:
         """
         Returns all routing rules ordered by priority (highest first).
         BUG 30 fix: used by CommandRouter for regex-based dispatch.
+        BUG 70 fix: uses joinedload to fetch Tool metadata in one query.
         """
         result = await self.session.execute(
-            select(RoutingRule).order_by(RoutingRule.priority.desc())
+            select(RoutingRule)
+            .options(joinedload(RoutingRule.tool))
+            .order_by(RoutingRule.priority.desc())
         )
         return result.scalars().all()
 
     async def set_plugin_inactive(self, name: str) -> None:
-        """Marks a plugin as inactive (e.g. after a failed load). BUG 13 support."""
-        plugin = await self.session.get(Plugin, name)
-        if plugin:
-            plugin.is_active = False
-            await self.session.commit()
+        """Marks a plugin as inactive. BUG 13."""
+        from sqlalchemy import update
+        await self.session.execute(
+            update(Plugin).where(Plugin.name == name).values(is_active=False)
+        )
+        await self.session.commit()
+
+    async def deactivate_missing_plugins(self, active_names: list[str]) -> None:
+        """Marks plugins NOT in the list as inactive. BUG 240."""
+        from sqlalchemy import update
+        await self.session.execute(
+            update(Plugin)
+            .where(Plugin.name.notin_(active_names))
+            .values(is_active=False)
+        )
+        await self.session.commit()
 
     # --- Execution Logging ---
 
@@ -114,10 +139,14 @@ class OmniRepository:
         command_name: str,
         raw_input: str,
         success: bool,
-        response_time_ms: int | None = None,
+        response_time_ms: float | None = None,
         error_reason: str | None = None
-    ):
-        """Adds a record to the audit trail."""
+    ) -> None:
+        """Adds a record to the audit trail. BUG 183 sanitized."""
+        # Sanitize error reason specifically for audit logs to prevent injection (B183)
+        from src.security.sanitizer import CommandSanitizer
+        safe_reason = CommandSanitizer.sanitize(error_reason) if error_reason else None
+
         log = ExecutionLog(
             user_id=user_id,
             platform=platform,
@@ -125,25 +154,35 @@ class OmniRepository:
             raw_input=raw_input,
             success=success,
             response_time_ms=response_time_ms,
-            error_reason=error_reason
+            error_reason=safe_reason
         )
         self.session.add(log)
         await self.session.commit()
 
     # --- API Health Watchdog ---
 
-    async def increment_error(self, url: str, tool_id: int, error_msg: str) -> bool:
+    async def increment_error(self, url: str, tool_id: int | None, error_msg: str) -> bool:
         """
         Increments failure count. Quarantines and logs to DeadApi if threshold reached.
         Returns True if the API is now quarantined as a result of this error.
         """
-        health = await self.session.get(ApiHealth, url)
+        # BUG 220 + BUG 274 fix: use atomic SQL update and fetch fresh data.
+        # execute(update) does not refresh loaded objects; we must SELECT again.
+        from sqlalchemy import select
+        await self.session.execute(
+            update(ApiHealth)
+            .where(ApiHealth.url == url)
+            .values(consecutive_failures=ApiHealth.consecutive_failures + 1, last_failure=datetime.now(UTC))
+        )
+        
+        # Fresh fetch to avoid identity-map stale counter values
+        result = await self.session.execute(select(ApiHealth).where(ApiHealth.url == url))
+        health = result.scalar_one_or_none()
+        
         if not health:
-            health = ApiHealth(url=url, consecutive_failures=0, error_threshold=3, is_quarantined=False)
+            health = ApiHealth(url=url, consecutive_failures=1, last_failure=datetime.now(UTC), error_threshold=3)
             self.session.add(health)
-
-        health.consecutive_failures += 1
-        health.last_failure = datetime.now(UTC)
+            await self.session.flush()
 
         is_newly_dead = False
         if health.consecutive_failures >= health.error_threshold and not health.is_quarantined:
@@ -208,15 +247,36 @@ class OmniRepository:
         # BUG 56: Removed redundant local imports
         await self.session.execute(
             update(DeadApi)
-            .where(DeadApi.api_url == url, not DeadApi.reactivated)
+            .where(DeadApi.api_url == url, DeadApi.reactivated == False)  # noqa: E712
             .values(reactivated=True)
         )
         await self.session.commit()
 
-    async def get_api_key(self, tool_id: int) -> str | None:
-        """Fetches the encrypted API key for a tool."""
+    async def register_tool_requirement(self, tool_id: int, api_key: str, service: str = "default") -> None:
+        """Saves or updates an encrypted API key for a tool. BUG 279 (UPSERT)."""
+        service = service or "default"
+        # Since this is a specialized repo method, we handle the select/merge
         result = await self.session.execute(
-            select(ToolRequirement).where(ToolRequirement.tool_id == tool_id)
+            select(ToolRequirement).where(
+                ToolRequirement.tool_id == tool_id, 
+                ToolRequirement.service == service
+            )
+        )
+        req = result.scalar_one_or_none()
+        if req:
+            req.api_key_value = api_key
+        else:
+            req = ToolRequirement(tool_id=tool_id, service=service, api_key_value=api_key)
+            self.session.add(req)
+        await self.session.commit()
+
+    async def get_api_key(self, tool_id: int, service: str = "default") -> str | None:
+        """Fetches the encrypted API key for a tool (optional service name). BUG 181."""
+        result = await self.session.execute(
+            select(ToolRequirement).where(
+                ToolRequirement.tool_id == tool_id, 
+                ToolRequirement.service == (service or "default")
+            )
         )
         req = result.scalar_one_or_none()
         return req.api_key_value if req else None

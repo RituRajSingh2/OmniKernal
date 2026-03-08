@@ -6,6 +6,7 @@ WhatsApp profiles. Enforces headless mode when ≥2 profiles are active.
 """
 
 import os
+from typing import Any
 
 from src.core.logger import core_logger
 from src.profiles.lock import ProfileLock
@@ -32,7 +33,7 @@ class ProfileManager:
         self.metadata = ProfileMetadata(profiles_dir)
         self.logger = core_logger.bind(subsystem="profile_manager")
 
-    def create(self, name: str, platform: str = "whatsapp") -> dict:
+    def create(self, name: str, platform: str = "whatsapp") -> dict[str, Any]:
         """
         Creates a new profile directory and initializes metadata.
 
@@ -55,7 +56,7 @@ class ProfileManager:
         self.logger.info(f"Profile created: {name} (platform={platform})")
         return data
 
-    def activate(self, name: str) -> dict:
+    def activate(self, name: str) -> dict[str, Any]:
         """
         Activates a profile: acquires lock and resolves flags (headless).
 
@@ -109,13 +110,13 @@ class ProfileManager:
         return [
             d for d in os.listdir(self.profiles_dir)
             if os.path.isdir(os.path.join(self.profiles_dir, d))
-            and d != ".gitkeep"
+            and not d.startswith(".") # BUG 161 (skips .git, .tmp)
         ]
 
     def should_force_headless(self) -> bool:
         """Returns True if ≥2 profiles are currently active (locked)."""
         return self.lock.get_active_count() >= 2
 
-    def get_profile(self, name: str) -> dict | None:
+    def get_profile(self, name: str) -> dict[str, Any] | None:
         """Returns metadata for a profile, or None if it doesn't exist."""
         return self.metadata.load(name)

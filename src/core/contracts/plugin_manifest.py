@@ -13,6 +13,7 @@ files just to discover metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ class PluginManifest:
     min_core_version: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict) -> PluginManifest:
+    def from_dict(cls, data: dict[str, Any]) -> PluginManifest:
         """
         Constructs a PluginManifest from a parsed manifest.json dictionary.
         Supports both 'platform' and the legacy 'supported_platforms' key.
@@ -60,10 +61,14 @@ class PluginManifest:
         if not version:
             raise ValueError("Plugin manifest missing required field: 'version'")
 
-        # Normalise platform key (BUG 6 compat shim carried into contract)
-        platform = data.get("platform") or data.get("supported_platforms") or ["any"]
-        if isinstance(platform, str):
-            platform = [platform]
+        # Normalise platform key (BUG 148 fix: robust list coercion)
+        platform_raw = data.get("platform") or data.get("supported_platforms") or ["any"]
+        if isinstance(platform_raw, str):
+            platform = [platform_raw]
+        elif isinstance(platform_raw, list):
+            platform = [str(p) for p in platform_raw]
+        else:
+            platform = ["any"]
 
         return cls(
             name=name,

@@ -32,6 +32,9 @@ class CommandParser:
       "!add (n) <val>"  → literal parens are escaped, treated literally
     """
 
+    # BUG 72: Cache for compiled regex objects to avoid re-compilation on every message
+    _compiled_cache: dict[str, re.Pattern[str]] = {}
+
     @classmethod
     def match(cls, text: str, pattern: str) -> dict[str, str] | None:
         """
@@ -39,21 +42,22 @@ class CommandParser:
         Returns a dict of extracted arguments on success, or None on failure.
 
         Conversion logic:
-          1. Split pattern on <arg_name> tokens, collecting literal segments
-             and placeholder names in order.
-          2. re.escape() each literal segment (BUG 41 fix).
-          3. All placeholders except the last → "(?P<arg_name>.+?)" (BUG 7 fix)
-          4. Last placeholder → "(?P<arg_name>.+)"
-          5. Assemble and match.
+          1. Check cache for pre-compiled regex (BUG 72 fix).
+          2. Split pattern on <arg_name> tokens, collecting literal segments.
+          3. re.escape() each literal segment (BUG 41 fix).
+          4. All placeholders except the last → "(?P<arg_name>.+?)" (BUG 7 fix).
+          5. Compile and cache.
         """
         if not text or not pattern:
             return None
 
+        # BUG 72 fix: Return from cache if we've seen this pattern before
+        if pattern in cls._compiled_cache:
+            match = cls._compiled_cache[pattern].match(text)
+            return match.groupdict() if match else None
+
         # Split the pattern into alternating [literal, placeholder, literal, ...] parts
-        # re.split with a capturing group preserves the matched groups in the list
         parts = re.split(r"(<[^>]+>)", pattern)
-        # parts = ["!echo ", "<text>", ""]  for "!echo <text>"
-        # parts = ["!kick ", "<user>", " ", "<reason>", ""]  for "!kick <user> <reason>"
 
         # Count placeholders
         placeholders = [p for p in parts if p.startswith("<") and p.endswith(">")]
@@ -62,12 +66,15 @@ class CommandParser:
         if num_args == 0:
             # No arguments — literal match only
             try:
-                return {} if re.match(f"^{re.escape(pattern)}$", text) else None
+                # Cache literal matches too
+                regex_pattern = f"^{re.escape(pattern)}$"
+                compiled = re.compile(regex_pattern)
+                cls._compiled_cache[pattern] = compiled
+                return {} if compiled.match(text) else None
             except re.error:
                 return None
 
         # Build regex by escaping literal parts and converting placeholders
-        # BUG 7 + BUG 41 fix
         counter = 0
         regex_parts: list[str] = []
 
@@ -75,20 +82,26 @@ class CommandParser:
             if part.startswith("<") and part.endswith(">"):
                 # Placeholder → named capture group
                 counter += 1
-                name = part[1:-1]  # strip < >
+                # BUG 130 + BUG 160 fix: sanitize group name. Must be alphanumeric/underscore
+                # and cannot start with a digit.
+                name = re.sub(r"\W", "_", part[1:-1])
+                if name and name[0].isdigit():
+                    name = f"_{name}"
+                elif not name:
+                    name = "arg"
+                
                 quantifier = ".+" if counter == num_args else ".+?"
                 regex_parts.append(f"(?P<{name}>{quantifier})")
             else:
                 # Literal segment → escape metacharacters (BUG 41 fix)
                 regex_parts.append(re.escape(part))
 
-        regex_pattern = "".join(regex_parts)
+        regex_string = f"^{''.join(regex_parts)}$"
 
         try:
-            match = re.match(f"^{regex_pattern}$", text)
-            if match:
-                return match.groupdict()
+            compiled = re.compile(regex_string)
+            cls._compiled_cache[pattern] = compiled
+            match = compiled.match(text)
+            return match.groupdict() if match else None
         except re.error:
             return None
-
-        return None

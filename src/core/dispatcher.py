@@ -25,6 +25,7 @@ via a regex rule (where the trigger doesn't equal the canonical command name).
 
 import importlib
 import os
+import inspect # BUG 122
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from src.core.contracts.command_context import CommandContext
@@ -39,15 +40,6 @@ if TYPE_CHECKING:
     from src.database.repository import OmniRepository
 
 
-# BUG 20: comma-separated list of platform user IDs that are admins,
-# e.g. OMNIKERNAL_ADMINS=+91xxxxxxxxxx,admin_user
-_ADMIN_IDS: frozenset[str] = frozenset(
-    uid.strip()
-    for uid in os.getenv("OMNIKERNAL_ADMINS", "").split(",")
-    if uid.strip()
-)
-
-
 # BUG 53 fix: structured return value carrying route metadata alongside the
 # CommandResult. Lets callers (engine) know which tool was actually executed.
 class DispatchResult(NamedTuple):
@@ -60,9 +52,19 @@ def _resolve_role(user: "User") -> str:
     """
     BUG 20 fix: Returns the effective role for a user.
     If the user's platform ID appears in OMNIKERNAL_ADMINS, they get 'admin'.
+    
+    BUG 157 fix: only elevate if current role is objectively weaker than 'admin'.
+    
+    BUG 261 fix: fetch admins dynamically instead of caching global constant.
     """
-    if user.id in _ADMIN_IDS:
-        return "admin"
+    admins = {
+        uid.strip()
+        for uid in os.getenv("OMNIKERNAL_ADMINS", "").split(",")
+        if uid.strip()
+    }
+    if user.id in admins:
+        if not PermissionValidator.check_role(user.role, "admin"):
+            return "admin"
     return user.role
 
 
@@ -108,9 +110,10 @@ class EventDispatcher:
 
         # 2. BUG 39 fix: resolve effective role, then check that directly
         effective_role = _resolve_role(user)
-        if not PermissionValidator.check_role(effective_role, required_role="user"):
+        required_role = route.get("required_role", "user") # BUG 71
+        if not PermissionValidator.check_role(effective_role, required_role=required_role):
             return DispatchResult(
-                result=CommandResult.error("Permission denied"),
+                result=CommandResult.error(f"Permission denied: {required_role} level required"),
                 tool_id=route["id"],
                 command_name=route["command_name"],
             )
@@ -131,11 +134,19 @@ class EventDispatcher:
 
             # Build absolute dotted path: plugins.echo.handlers.echo
             # BUG 42 fix: prefix handler_path with the plugin's root module
-            full_handler_path = f"plugins.{plugin_name}.{raw_handler_path}"
+            # BUG 260 fix: ensure handler path doesn't try to escape folder via relative dots
+            clean_handler = raw_handler_path.lstrip(".")
+            full_handler_path = f"plugins.{plugin_name}.{clean_handler}"
             module_path, func_name = full_handler_path.rsplit(".", 1)
 
             module = importlib.import_module(module_path)
             handler_func = getattr(module, func_name)
+
+            # BUG 122 fix: ensure handler is a coroutine before awaiting
+            if not inspect.iscoroutinefunction(handler_func):
+                raise TypeError(
+                    f"Handler '{full_handler_path}' is not a coroutine function (use 'async def')."
+                )
 
             # BUG 63: If user was elevated via OMNIKERNAL_ADMINS, we must pass
             # a User object to the context that reflects this role, otherwise

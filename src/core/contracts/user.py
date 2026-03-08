@@ -29,8 +29,10 @@ class User:
     role: str = "user"  # "user" | "admin"
 
     def is_admin(self) -> bool:
-        """Return True if this user has admin role."""
-        return self.role == "admin"
+        """Return True if this user has admin role (or higher)."""
+        # BUG 155 fix: use the validator to handle role hierarchy
+        from src.core.permissions import PermissionValidator
+        return PermissionValidator.check_role(self.role, "admin")
 
     def __repr__(self) -> str:
         return f"User(id={self.id!r}, name={self.display_name!r}, platform={self.platform!r}, role={self.role!r})"

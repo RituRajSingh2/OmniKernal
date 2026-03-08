@@ -23,10 +23,9 @@ class CommandSanitizer:
     """
 
     # Shell metacharacters to strip (literal chars, not escape sequences)
-    # Covers: ; & | ` $ ( ) [ ] { } < > \
-    # BUG 17 fix: removed \\n and \\r from this raw string — they were wrong.
-    # Newlines are now removed in step 2 below before this pattern runs.
-    FORBIDDEN_CHARS = r"[;\&|`\$\(\)\[\]{}<>\\]"
+    # BUG 78 fix: relaxed to allow brackets () [] {} <> which are safe and useful.
+    # Still blocks chaining/injection tokens: ; & | ` $ \
+    FORBIDDEN_CHARS = r"[;\&|`\$\\]"
 
     @classmethod
     def sanitize(cls, raw_text: str) -> str:
@@ -46,9 +45,9 @@ class CommandSanitizer:
         # 1. Basic trim
         text = raw_text.strip()
 
-        # 2. BUG 17 fix: strip actual newline / carriage-return control chars first.
-        #    Using str.replace here avoids the raw-string escape confusion entirely.
-        text = text.replace("\n", "").replace("\r", "")
+        # 2. BUG 133 fix: replace newlines with spaces instead of deleting them.
+        #    This prevents "!echo\nhello" from merging into "!echohello".
+        text = text.replace("\n", " ").replace("\r", " ")
 
         # 3. Strip shell metacharacters
         text = re.sub(cls.FORBIDDEN_CHARS, "", text)

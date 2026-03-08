@@ -7,6 +7,8 @@ the entry class fully implements the PlatformAdapter ABC contract.
 
 
 import yaml
+import inspect  # BUG 76
+from typing import Any
 
 from src.core.interfaces.platform_adapter import PlatformAdapter
 from src.core.logger import core_logger
@@ -25,10 +27,10 @@ class AdapterValidator:
     REQUIRED_METHODS = {"connect", "fetch_new_messages", "send_message", "disconnect"}
     REQUIRED_PROPERTIES = {"platform_name"}
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.logger = core_logger.bind(subsystem="adapter_validator")
 
-    def validate_descriptor(self, yaml_path: str) -> dict:
+    def validate_descriptor(self, yaml_path: str) -> dict[str, Any]:
         """
         Reads and validates an adapter.yaml file.
 
@@ -74,12 +76,16 @@ class AdapterValidator:
                 f"{cls.__name__} must be a subclass of PlatformAdapter"
             )
 
-        # Check required async methods
+        # Check required async methods (BUG 76 fix: verify they are coroutines)
         for method_name in self.REQUIRED_METHODS:
             method = getattr(cls, method_name, None)
             if method is None:
                 raise TypeError(
                     f"{cls.__name__} is missing required method: {method_name}"
+                )
+            if not inspect.iscoroutinefunction(method):
+                raise TypeError(
+                    f"{cls.__name__}.{method_name} must be an 'async def' (coroutine)."
                 )
 
         # Check required properties

@@ -41,7 +41,7 @@ class CoopMode:
         self._approval_events: dict[str, asyncio.Event] = {}
         self._rejected: set[str] = set()
         # BUG 22 fix: track all background tasks so we can cancel on shutdown
-        self._active_tasks: set[asyncio.Task] = set()
+        self._active_tasks: set[asyncio.Task[None]] = set()
         # BUG 64 fix: track IDs mid-processing to prevent duplicate task spawn
         self._processing_ids: set[str] = set()
 
@@ -96,15 +96,15 @@ class CoopMode:
             f"'{msg.raw_text}'"
         )
 
-        await event.wait()
-
-        # Cleanup
-        approved = msg_id not in self._rejected
-        self._pending.pop(msg_id, None)
-        self._approval_events.pop(msg_id, None)
-        self._rejected.discard(msg_id)
-
-        return approved
+        try:
+            await event.wait()
+            approved = msg_id not in self._rejected
+            return approved
+        finally:
+            # BUG 69 fix: cleanup in finally ensures dictionaries don't leak on cancellation
+            self._pending.pop(msg_id, None)
+            self._approval_events.pop(msg_id, None)
+            self._rejected.discard(msg_id)
 
     async def run(self, core: "OmniKernal", adapter: "PlatformAdapter") -> None:
         """
@@ -125,6 +125,10 @@ class CoopMode:
                     messages = await adapter.fetch_new_messages()
 
                     for msg in messages:
+                        # BUG 83 fix: break immediately if engine is stopping
+                        if not core.is_running:
+                            break
+
                         # BUG 48 + BUG 64 fix: skip if already awaiting approval or spawning
                         if msg.id in self._pending or msg.id in self._processing_ids:
                             continue
@@ -138,7 +142,7 @@ class CoopMode:
                         )
                         self._active_tasks.add(task)
                         # Remove from BOTH sets when task finishes
-                        def _cleanup(t, m_id=msg.id):
+                        def _cleanup(t: asyncio.Task[None], m_id: str = msg.id) -> None:
                             self._active_tasks.discard(t)
                             self._processing_ids.discard(m_id)
 

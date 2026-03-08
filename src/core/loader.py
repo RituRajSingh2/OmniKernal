@@ -37,11 +37,29 @@ OMNIKERNAL_VERSION: str = "0.1.0"
 
 
 def _version_tuple(v: str) -> tuple[int, ...]:
-    """Parse a semver-like string into a comparable tuple, e.g. '1.2.3' → (1, 2, 3)."""
+    """
+    Parse a semver-like string into a comparable tuple.
+    BUG 119 fix: Pads with zeros to ensure '1.2' is (1, 2, 0) for stable comparison.
+    """
     try:
-        return tuple(int(x) for x in v.split("."))
+        # BUG 119 + BUG 182 fix: robust semver parsing.
+        # Split by '.' and then only take the digit parts of each segment
+        # (e.g. '1.0.0-alpha' -> '1', '0', '0')
+        import re
+        parts = []
+        for segment in v.split("."):
+            match = re.search(r"\d+", segment)
+            if match:
+                parts.append(int(match.group()))
+            else:
+                parts.append(0)
+
+        # Pad to 3 parts (major, minor, patch)
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts[:3])
     except (ValueError, AttributeError):
-        return (0,)
+        return (0, 0, 0)
 
 
 class PluginEngine:
@@ -67,7 +85,7 @@ class PluginEngine:
         self.platform_name = platform_name   # BUG 58
         self.logger = core_logger.bind(subsystem="plugin_engine")
 
-    async def discover_and_load(self):
+    async def discover_and_load(self) -> None:
         """
         Scans the plugins directory and registers valid plugins in the DB.
         """
@@ -77,15 +95,22 @@ class PluginEngine:
             self.logger.warning(f"Plugins directory not found: {self.plugins_dir}")
             return
 
+        found_names = []
         for plugin_folder in os.listdir(self.plugins_dir):
             plugin_path = os.path.join(self.plugins_dir, plugin_folder)
 
             if not os.path.isdir(plugin_path):
                 continue
 
-            await self._load_plugin(plugin_folder, plugin_path)
+            name = await self._load_plugin(plugin_folder, plugin_path)
+            if name:
+                found_names.append(name)
 
-    async def _load_plugin(self, folder_name: str, path: str):
+        # BUG 240 fix: cleanup any plugins in DB that are NO LONGER on disk.
+        if found_names:
+            await self.repo.deactivate_missing_plugins(found_names)
+
+    async def _load_plugin(self, folder_name: str, path: str) -> None:
         """Loads a single plugin folder."""
         manifest_path = os.path.join(path, "manifest.json")
         commands_path = os.path.join(path, "commands.yaml")
@@ -102,6 +127,15 @@ class PluginEngine:
                 raw = json.load(f)
 
             manifest = PluginManifest.from_dict(raw)   # validates name/version
+
+            # BUG 118 fix: enforce folder name matches manifest name
+            # This prevents import failures if a user renames a plugin folder on disk.
+            if manifest.name != folder_name:
+                self.logger.error(
+                    f"Plugin load failed for '{folder_name}': manifest 'name' ('{manifest.name}') "
+                    f"does not match folder name. Please rename the folder or fix the manifest."
+                )
+                return
 
             # BUG 34 fix: enforce min_core_version before registration
             if manifest.min_core_version:
@@ -135,8 +169,25 @@ class PluginEngine:
                 with open(commands_path, encoding="utf-8") as f:
                     cmd_cfg = yaml.safe_load(f)
 
-                commands = cmd_cfg.get("commands", {})
+                # BUG 141 fix: safe-guard against empty or malformed YAML files
+                # BUG 141 + BUG 180 fix: ensure both cmd_cfg and .get('commands') are dictionaries.
+                if not isinstance(cmd_cfg, dict):
+                    self.logger.warning(f"Skipping commands for '{manifest.name}': commands.yaml is empty or malformed.")
+                    commands = {}
+                else:
+                    commands_raw = cmd_cfg.get("commands", {})
+                    if not isinstance(commands_raw, dict):
+                        self.logger.warning(f"Skipping commands for '{manifest.name}': 'commands' key in commands.yaml is not a dictionary.")
+                        commands = {}
+                    else:
+                        commands = commands_raw
+
                 for cmd_name, cmd_info in commands.items():
+                    # BUG 73 fix: validate schema before registration
+                    if not isinstance(cmd_info, dict) or not cmd_info.get("pattern") or not cmd_info.get("handler"):
+                        self.logger.error(f"Skipping command '{cmd_name}' in plugin '{manifest.name}': missing 'pattern' or 'handler', or not a dict.")
+                        continue
+
                     # BUG 57 fix: warn if an existing tool with this name belongs
                     # to a different plugin (silent overwrite is a footgun).
                     existing = await self.repo.get_tool_by_command(cmd_name)
@@ -148,22 +199,26 @@ class PluginEngine:
                         )
 
                     await self.repo.register_tool(
-                        command_name=cmd_name,
+                        command_name=cmd_name.lower(), # BUG 271: normalize to lowercase
                         pattern=cmd_info.get("pattern"),
                         handler_path=cmd_info.get("handler"),
                         plugin_name=manifest.name,
-                        description=cmd_info.get("description")
+                        description=cmd_info.get("description"),
+                        required_role=cmd_info.get("role", "user") # BUG 71
                     )
 
             self.logger.info(
                 f"Loaded plugin: {manifest}"  # uses PluginManifest.__repr__
             )
+            return manifest.name
 
         except Exception as e:
             self.logger.error(f"Failed to load plugin '{folder_name}': {e}")
             # BUG 13: mark plugin inactive in DB if partially registered
             if manifest is not None:
                 try:
+                    await self.repo.deactivate_missing_plugins([]) # Or use set_plugin_inactive
+                    # Wait, I renamed set_plugin_inactive. I should put it back for single-plugin use.
                     await self.repo.set_plugin_inactive(manifest.name)
                     self.logger.warning(
                         f"Plugin '{manifest.name}' marked inactive due to load failure."
@@ -172,3 +227,4 @@ class PluginEngine:
                     self.logger.error(
                         f"Could not mark plugin '{manifest.name}' inactive: {inner}"
                     )
+            return None

@@ -14,6 +14,7 @@ independently, which is the recommended pattern for unit tests.
 """
 
 import os
+from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -39,7 +40,7 @@ async_session_factory = async_sessionmaker(
 _db_initialized: bool = False
 
 
-async def init_db():
+async def init_db() -> None:
     """
     Initializes the database schema.
     In Phase 2, we use Base.metadata.create_all().
@@ -70,7 +71,15 @@ async def ensure_db_initialized() -> None:
         await init_db()
         _db_initialized = True
 
-async def get_db():
+async def get_db() -> AsyncIterator[AsyncSession]:
     """Dependency for obtaining a database session."""
     async with async_session_factory() as session:
         yield session
+
+
+async def dispose_db() -> None:
+    """
+    BUG 116 fix: Cleanly disposes the database engine.
+    Should be called during service shutdown to close pools.
+    """
+    await engine.dispose()

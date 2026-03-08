@@ -54,6 +54,9 @@ class SelfMode:
                 messages = await adapter.fetch_new_messages()
 
                 for msg in messages:
+                    # BUG 83 fix: break immediately if engine is stopping
+                    if not core.is_running:
+                        break
                     await core.process(msg)
 
                 await asyncio.sleep(self.poll_interval)
@@ -65,8 +68,11 @@ class SelfMode:
                 # BUG 40 fix: Only retry on genuinely transient errors.
                 # Classify the exception before deciding to swallow it.
                 error_type = type(e).__name__
+                # BUG 40 + BUG 162 fix: classify logic errors and system errors as fatal.
+                # Only Connection/Timeout are truly transient for polling.
                 is_likely_fatal = isinstance(
-                    e, (MemoryError, RuntimeError, PermissionError, OSError)
+                    e, (MemoryError, RuntimeError, PermissionError, OSError, 
+                        AttributeError, TypeError, NameError, ImportError)
                 ) and not isinstance(e, (ConnectionError, TimeoutError))
 
                 if is_likely_fatal:

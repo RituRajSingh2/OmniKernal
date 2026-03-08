@@ -8,6 +8,7 @@ PlatformAdapter instance.
 
 import importlib
 import os
+from typing import cast
 
 from src.adapters.validator import AdapterValidator
 from src.core.interfaces.platform_adapter import PlatformAdapter
@@ -51,6 +52,12 @@ class AdapterLoader:
             ValueError: If the descriptor is invalid.
             TypeError: If the class doesn't implement PlatformAdapter.
         """
+        # BUG 117 fix: sanitize pack_name to prevent directory traversal
+        # Only allow alphanumeric and underscore characters.
+        import re
+        if not re.fullmatch(r"[a-zA-Z0-9_]+", pack_name):
+            raise ValueError(f"Invalid pack name: '{pack_name}'. Only alphanumeric/underscore allowed.")
+
         pack_path = os.path.join(self.packs_dir, pack_name)
 
         if not os.path.isdir(pack_path):
@@ -85,7 +92,7 @@ class AdapterLoader:
         self.validator.validate_class(cls)
 
         # 5. Instantiate and return
-        instance = cls()
+        instance = cast(PlatformAdapter, cls())
         self.logger.info(f"Adapter loaded: {instance.platform_name} (v{descriptor['version']})")
         return instance
 

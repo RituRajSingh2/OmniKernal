@@ -30,8 +30,10 @@ class RulesCache:
     Mutable container for cached routing rules (BUG 68).
     Allows sharing a cache across multiple ephemeral CommandRouter instances.
     """
-    def __init__(self):
+    def __init__(self) -> None:
         self.rules: Sequence[Any] | None = None
+        # BUG 170 fix: store regex cache in shared container so it persists across messages
+        self.regex_cache: dict[str, re.Pattern] = {}
 
 
 class CommandRouter:
@@ -49,11 +51,13 @@ class CommandRouter:
     invalidate_route_cache() if rules change at runtime.
     """
 
-    def __init__(self, repository: OmniRepository, cache: RulesCache | None = None):
+    def __init__(self, repository: OmniRepository, cache: RulesCache | None = None) -> None:
         self.repository = repository
         # BUG 68 fix: use shared cache if provided, else local one
         self._shared_cache = cache
         self._local_cache: Sequence[Any] | None = None
+        # BUG 120 + BUG 170 fix: regex cache container (instance-local or shared)
+        self._local_regex_cache: dict[str, re.Pattern] = {}
 
     @property
     def _rules(self) -> Sequence[Any] | None:
@@ -62,7 +66,7 @@ class CommandRouter:
         return self._local_cache
 
     @_rules.setter
-    def _rules(self, value: Sequence[Any]):
+    def _rules(self, value: Sequence[Any]) -> None:
         if self._shared_cache:
             self._shared_cache.rules = value
         else:
@@ -72,10 +76,21 @@ class CommandRouter:
         """Clears the cached routing rules."""
         if self._shared_cache:
             self._shared_cache.rules = None
+            self._shared_cache.regex_cache.clear() # BUG 170
         else:
             self._local_cache = None
+            self._local_regex_cache.clear()
 
-    async def get_route(self, command_trigger: str) -> dict | None:
+    def _get_compiled_regex(self, pattern: str) -> re.Pattern:
+        """
+        BUG 120 + BUG 170 fix: Get pre-compiled regex from the correct cache.
+        """
+        cache_dict = self._shared_cache.regex_cache if self._shared_cache else self._local_regex_cache
+        if pattern not in cache_dict:
+            cache_dict[pattern] = re.compile(pattern)
+        return cache_dict[pattern]
+
+    async def get_route(self, command_trigger: str) -> dict[str, Any] | None:
         """
         Looks up a route by command trigger.
 
@@ -95,11 +110,15 @@ class CommandRouter:
         if self._rules is None:
             self._rules = await self.repository.get_all_routing_rules()
 
-        for rule in self._rules:
+        rules = self._rules or []
+        for rule in rules:
             try:
-                if re.fullmatch(rule.regex_pattern, command_trigger):
-                    # Resolve the tool this rule maps to
-                    tool = await self.repository.get_tool_by_id(rule.tool_id)
+                # BUG 120 fix: use pre-compiled regex from cache
+                pattern_obj = self._get_compiled_regex(rule.regex_pattern)
+                
+                if pattern_obj.fullmatch(command_trigger):
+                    # Resolve the tool this rule maps to (BUG 70: pre-fetched)
+                    tool = rule.tool
                     if tool:
                         return {
                             "id": tool.id,
@@ -107,6 +126,7 @@ class CommandRouter:
                             "pattern": tool.pattern,
                             "handler_path": tool.handler_path,
                             "plugin_name": tool.plugin_name,
+                            "required_role": tool.required_role,  # BUG 71
                             "_via_routing_rule": rule.regex_pattern,  # debug aid
                         }
             except re.error:
@@ -114,7 +134,9 @@ class CommandRouter:
                 continue
 
         # 2. Exact command name lookup (fallback)
-        tool = await self.repository.get_tool_by_command(command_trigger)
+        # BUG 30 + BUG 271 fix: exact match using normalized trigger
+        # We lower() it here to handle cases where dispatcher didn't, or DB changed.
+        tool = await self.repository.get_tool_by_command(command_trigger.lower())
         if not tool:
             return None
 
@@ -124,6 +146,7 @@ class CommandRouter:
             "pattern": tool.pattern,
             "handler_path": tool.handler_path,
             "plugin_name": tool.plugin_name,
+            "required_role": tool.required_role, # BUG 71
         }
 
     async def list_commands(self) -> list[str]:

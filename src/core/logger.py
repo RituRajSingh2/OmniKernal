@@ -12,11 +12,12 @@ Without this, any module that imports `from loguru import logger` directly
 """
 
 import sys
+from typing import Any
 
 from loguru import logger
 
 
-def setup_logger(level: str = "INFO", profile_name: str = "default"):
+def setup_logger(level: str = "INFO", profile_name: str = "default") -> Any:
     """
     Configures loguru for OmniKernal.
     In Phase 1, we focus on console output with a clean format.

@@ -1,0 +1,10 @@
+{
+    "sys_plugins": {
+        "allowed_roles": [
+            "user",
+            "admin"
+        ],
+        "blocked_users": [],
+        "rate_limit": "100/hour"
+    }
+}

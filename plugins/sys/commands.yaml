@@ -1,0 +1,7 @@
+commands:
+  sys_plugins:
+    description: "List all active plugins loaded in the OmniKernal registry."
+    pattern: "!sys plugins"
+    handler: "handlers.sys_plugins.run"
+    requires_api: false
+    args: []

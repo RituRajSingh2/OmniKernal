@@ -16,8 +16,16 @@ Key design decisions:
 """
 
 import os
+import re
 import asyncio
 from datetime import datetime, timezone
+
+# WhatsApp Web appends the timestamp directly into the text node that whatsplay
+# reads with inner_text(). Strip it before the text reaches the Core.
+# Matches: "6:31 PM", "10:30 AM", "7:18 am", "23:45" (24h) at end of string.
+_WA_TIMESTAMP_RE = re.compile(
+    r"\s*\d{1,2}:\d{2}(?:\s*[APap]\.?[Mm]\.?)?\s*$"
+)
 
 from whatsplay import Client
 from whatsplay.auth.local_profile_auth import LocalProfileAuth
@@ -31,6 +39,11 @@ from src.core.interfaces.platform_adapter import PlatformAdapter
 # Directory (relative to CWD) where persistent browser profiles are stored.
 # Each adapter instance uses its own sub-directory keyed by profile_name.
 _SESSION_BASE_DIR = "profiles"
+
+
+def _strip_wa_timestamp(text: str) -> str:
+    """Remove the trailing WhatsApp timestamp whatsplay concatenates onto msg text."""
+    return _WA_TIMESTAMP_RE.sub("", text).strip()
 
 
 class WhatsAppPlaywrightAdapter(PlatformAdapter):
@@ -146,7 +159,10 @@ class WhatsAppPlaywrightAdapter(PlatformAdapter):
                         continue
 
                     # Build a stable dedup ID
-                    text = getattr(msg, "text", "") or ""
+                    raw_text = getattr(msg, "text", "") or ""
+                    # Strip trailing WhatsApp timestamp that whatsplay concatenates
+                    # onto the text (e.g. "!sys_plugins6:31 PM" → "!sys_plugins")
+                    text = _strip_wa_timestamp(raw_text)
                     sender = getattr(msg, "sender", chat_name) or chat_name
                     ts = getattr(msg, "timestamp", None)
                     msg_id = (
@@ -158,7 +174,7 @@ class WhatsAppPlaywrightAdapter(PlatformAdapter):
                         continue
                     self._processed_msg_ids.add(msg_id)
 
-                    # Skip empty messages
+                    # Skip empty messages (after timestamp strip)
                     if not text.strip():
                         continue
 

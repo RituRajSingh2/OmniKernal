@@ -64,4 +64,8 @@ Thumbs.db
 # Keep profiles/.gitkeep but exclude all runtime subdirectories and their contents
 profiles/*/
 
-
+# whatsplay auto-generated debug screenshots
+init_main.png
+pocos_chats_visibles.png
+send_message_error.png
+send_file_error.png

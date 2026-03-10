@@ -75,6 +75,11 @@ class WhatsAppPlaywrightAdapter(PlatformAdapter):
         self._auth = LocalProfileAuth(data_dir=session_dir, profile="Default")
         self._client = Client(auth=self._auth, headless=headless)
 
+        # Serialise all browser-UI operations (open/close chats, type text).
+        # Without this, the poll loop's Escape-press can close a chat that
+        # send_message() just opened — causing 'timeout waiting for input box'.
+        self._browser_lock: asyncio.Lock = asyncio.Lock()
+
         # Track message IDs we've already processed to avoid duplicates
         self._processed_msg_ids: set[str] = set()
 
@@ -124,98 +129,101 @@ class WhatsAppPlaywrightAdapter(PlatformAdapter):
         """
         result: list[Message] = []
 
-        try:
-            # Step 1: find chats with unread messages (sidebar sweep)
-            unread_chats = await self._client.chat_manager._check_unread_chats(debug=False)
-        except Exception as e:
-            print(f"[WhatsAppAdapter] Warning: unread chat scan failed: {e}")
-            return []
-
-        for chat_info in unread_chats:
-            chat_name: str = chat_info.get("name") or ""
-            if not chat_name:
-                continue
-
+        async with self._browser_lock:
             try:
-                # Step 2: open the chat to make its messages visible
-                opened = await self._client.open(chat_name)
-                if not opened:
-                    print(f"[WhatsAppAdapter] Could not open chat: {chat_name!r}")
+                # Step 1: find chats with unread messages (sidebar sweep)
+                unread_chats = await self._client.chat_manager._check_unread_chats(debug=False)
+            except Exception as e:
+                print(f"[WhatsAppAdapter] Warning: unread chat scan failed: {e}")
+                return []
+
+            for chat_info in unread_chats:
+                chat_name: str = chat_info.get("name") or ""
+                if not chat_name:
                     continue
 
-                # Small wait for messages to render in the DOM
-                await asyncio.sleep(0.5)
-
-                # Step 3: collect all visible messages in this chat
-                raw_messages = await self._client.collect_messages()
-
-                # Step 4: parse, deduplicate, filter
-                for msg in raw_messages:
-                    if not isinstance(msg, WhatsplayMessage):
-                        continue
-
-                    # Skip outgoing (our own) messages
-                    if getattr(msg, "is_outgoing", False):
-                        continue
-
-                    # Build a stable dedup ID
-                    raw_text = getattr(msg, "text", "") or ""
-                    # Strip trailing WhatsApp timestamp that whatsplay concatenates
-                    # onto the text (e.g. "!sys_plugins6:31 PM" → "!sys_plugins")
-                    text = _strip_wa_timestamp(raw_text)
-                    sender = getattr(msg, "sender", chat_name) or chat_name
-                    ts = getattr(msg, "timestamp", None)
-                    msg_id = (
-                        getattr(msg, "msg_id", None)
-                        or f"{sender}:{text}:{ts}"
-                    )
-
-                    if msg_id in self._processed_msg_ids:
-                        continue
-                    self._processed_msg_ids.add(msg_id)
-
-                    # Skip empty messages (after timestamp strip)
-                    if not text.strip():
-                        continue
-
-                    user = User(
-                        id=sender,
-                        display_name=sender,
-                        platform=self._platform_name,
-                    )
-                    parsed = Message(
-                        id=msg_id,
-                        raw_text=text,
-                        user=user,
-                        timestamp=ts or datetime.now(timezone.utc),
-                        platform=self._platform_name,
-                    )
-                    result.append(parsed)
-                    print(f"[WhatsAppAdapter] 📨 New message from {sender!r}: {text!r}")
-
-            except Exception as e:
-                print(f"[WhatsAppAdapter] Error processing chat {chat_name!r}: {e}")
-            finally:
-                # Always close the chat after reading so the next poll starts clean
                 try:
-                    await self._client.chat_manager.close()
-                except Exception:
-                    pass
+                    # Step 2: open the chat to make its messages visible
+                    opened = await self._client.open(chat_name)
+                    if not opened:
+                        print(f"[WhatsAppAdapter] Could not open chat: {chat_name!r}")
+                        continue
+
+                    # Small wait for messages to render in the DOM
+                    await asyncio.sleep(0.5)
+
+                    # Step 3: collect all visible messages in this chat
+                    raw_messages = await self._client.collect_messages()
+
+                    # Step 4: parse, deduplicate, filter
+                    for msg in raw_messages:
+                        if not isinstance(msg, WhatsplayMessage):
+                            continue
+
+                        # Skip outgoing (our own) messages
+                        if getattr(msg, "is_outgoing", False):
+                            continue
+
+                        # Build a stable dedup ID
+                        raw_text = getattr(msg, "text", "") or ""
+                        # Strip trailing WhatsApp timestamp that whatsplay concatenates
+                        # onto the text (e.g. "!sys_plugins6:31 PM" → "!sys_plugins")
+                        text = _strip_wa_timestamp(raw_text)
+                        sender = getattr(msg, "sender", chat_name) or chat_name
+                        ts = getattr(msg, "timestamp", None)
+                        msg_id = (
+                            getattr(msg, "msg_id", None)
+                            or f"{sender}:{text}:{ts}"
+                        )
+
+                        if msg_id in self._processed_msg_ids:
+                            continue
+                        self._processed_msg_ids.add(msg_id)
+
+                        # Skip empty messages (after timestamp strip)
+                        if not text.strip():
+                            continue
+
+                        user = User(
+                            id=sender,
+                            display_name=sender,
+                            platform=self._platform_name,
+                        )
+                        parsed = Message(
+                            id=msg_id,
+                            raw_text=text,
+                            user=user,
+                            timestamp=ts or datetime.now(timezone.utc),
+                            platform=self._platform_name,
+                        )
+                        result.append(parsed)
+                        print(f"[WhatsAppAdapter] 📨 New message from {sender!r}: {text!r}")
+
+                except Exception as e:
+                    print(f"[WhatsAppAdapter] Error processing chat {chat_name!r}: {e}")
+                finally:
+                    # Always close the chat after reading so the next poll starts clean
+                    try:
+                        await self._client.chat_manager.close()
+                    except Exception:
+                        pass
 
         return result
 
     async def send_message(self, to: str, content: str) -> None:
         """
         Send a text reply to a chat identified by `to` (contact/chat name).
+        Acquires the browser lock so it doesn't race against the poll sweep.
         """
-        try:
-            success = await self._client.send_message(to, content)
-            if success:
-                print(f"[WhatsAppAdapter] ✅ Reply sent to {to!r}")
-            else:
-                print(f"[WhatsAppAdapter] ⚠️  send_message returned False for {to!r}")
-        except Exception as e:
-            print(f"[WhatsAppAdapter] ❌ Failed to send to {to!r}: {e}")
+        async with self._browser_lock:
+            try:
+                success = await self._client.send_message(to, content)
+                if success:
+                    print(f"[WhatsAppAdapter] ✅ Reply sent to {to!r}")
+                else:
+                    print(f"[WhatsAppAdapter] ⚠️  send_message returned False for {to!r}")
+            except Exception as e:
+                print(f"[WhatsAppAdapter] ❌ Failed to send to {to!r}: {e}")
 
     async def disconnect(self) -> None:
         """

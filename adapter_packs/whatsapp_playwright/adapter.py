@@ -14,23 +14,26 @@ Usage:
 """
 
 from src.core.contracts.message import Message
+from src.core.contracts.user import User
 from src.core.interfaces.platform_adapter import PlatformAdapter
+
+import whatsplay
+from whatsplay.object.message import Message as WhatsplayMessage
 
 
 class WhatsAppPlaywrightAdapter(PlatformAdapter):
     """
-    Playwright-based adapter for WhatsApp Web.
+    Playwright-based adapter for WhatsApp Web using the whatsplay library.
 
     Implements the PlatformAdapter hook contract.
     The Core calls connect() -> fetch_new_messages() -> send_message() -> disconnect().
-    All Playwright/DOM logic lives here — the Core never sees the browser.
     """
 
     def __init__(self):
         self._platform_name = "whatsapp"
-        self._browser = None
-        self._page = None
-        self._pw = None
+        # We start the client headful (headless=False) so we can scan the QR code manually for the first time
+        self._client = whatsplay.Client(headless=False)
+        self._processed_msg_ids = set()
 
     @property
     def platform_name(self) -> str:
@@ -39,57 +42,64 @@ class WhatsAppPlaywrightAdapter(PlatformAdapter):
     async def connect(self) -> None:
         """
         Start the Playwright browser and navigate to WhatsApp Web.
-
-        TODO (User Implementation):
-          1. Launch Chromium via Playwright
-          2. Navigate to https://web.whatsapp.com
-          3. Wait for QR code scan / session restore
-          4. Verify the main chat list is visible
         """
-        raise NotImplementedError(
-            "WhatsAppPlaywrightAdapter.connect() is a scaffold. "
-            "Implement Playwright browser launch and WhatsApp Web auth here."
-        )
+        # start() opens WhatsApp Web, and wait_until_logged_in() pauses until the user scans the QR
+        await self._client.start()
+        await self._client.wait_until_logged_in()
 
     async def fetch_new_messages(self) -> list[Message]:
         """
         Read unread messages from the WhatsApp Web DOM.
-
-        TODO (User Implementation):
-          1. Query DOM for unread message elements
-          2. Parse sender, text, timestamp from each element
-          3. Convert to Message objects
-          4. Mark messages as read to avoid re-processing
         """
-        raise NotImplementedError(
-            "WhatsAppPlaywrightAdapter.fetch_new_messages() is a scaffold. "
-            "Implement DOM scraping for unread messages here."
-        )
+        try:
+            # whatsplay reads the unread message dots and extracts the chats
+            wp_messages = await self._client.collect_messages()
+        except Exception as e:
+            print(f"DEBUG: Exception in collect_messages: {e}")
+            return []
+
+        parsed_messages = []
+        for msg in wp_messages:
+            print(f"DEBUG: Found message: text={getattr(msg, 'text', None)}, sender={getattr(msg, 'sender', None)}")
+            if not isinstance(msg, WhatsplayMessage):
+                continue
+
+            if msg.is_outgoing:
+                continue
+
+            # Deduplicate messages by tracking their unique ID
+            msg_id = msg.msg_id or str(hash(msg.text + msg.sender + str(msg.timestamp)))
+            if msg_id in self._processed_msg_ids:
+                continue
+
+            self._processed_msg_ids.add(msg_id)
+
+            user = User(
+                id=msg.sender,
+                display_name=msg.sender,
+                platform=self.platform_name
+            )
+
+            parsed = Message(
+                id=msg_id,
+                raw_text=msg.text,
+                user=user,
+                timestamp=msg.timestamp,
+                platform=self.platform_name
+            )
+            parsed_messages.append(parsed)
+
+        return parsed_messages
 
     async def send_message(self, to: str, content: str) -> None:
         """
         Send a reply to a specific chat in WhatsApp Web.
-
-        TODO (User Implementation):
-          1. Find or open the chat for the 'to' contact
-          2. Fill the message input box with 'content'
-          3. Press Enter or click Send
         """
-        raise NotImplementedError(
-            "WhatsAppPlaywrightAdapter.send_message() is a scaffold. "
-            "Implement DOM interaction for sending messages here."
-        )
+        # to is the exact chat query/name or phone number
+        await self._client.send_message(to, content)
 
     async def disconnect(self) -> None:
         """
         Tear down the Playwright browser session cleanly.
-
-        TODO (User Implementation):
-          1. Close browser pages
-          2. Close browser instance
-          3. Stop Playwright process
         """
-        raise NotImplementedError(
-            "WhatsAppPlaywrightAdapter.disconnect() is a scaffold. "
-            "Implement Playwright teardown here."
-        )
+        await self._client.close()

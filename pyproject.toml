@@ -46,14 +46,28 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
+# Core test suite — pytest runner, async support, coverage
+testing = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
+]
+# Code quality — linter, formatter, type checker, pre-commit hooks
+linting = [
     "ruff>=0.14.0",
     "mypy>=1.10.0",
-    "pre-commit>=3.7.0",
     "deptry>=0.23.0",
+    "pre-commit>=3.7.0",
+]
+# Adapter integration testing — manual WhatsApp / Playwright smoke tests
+adapter-testing = [
+    "whatsplay>=1.9.8",   # WhatsApp Web automation (whatsapp_playwright adapter)
+]
+# Convenience group — pulls in all of the above
+dev = [
+    "omnikernal[testing]",
+    "omnikernal[linting]",
+    "omnikernal[adapter-testing]",
 ]
 docs = [
     "mkdocs>=1.6.0",
@@ -79,19 +93,33 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 # ---------------------------------------------------------------------------
-# uv tooling
+# uv dependency-groups (uv sync / uv run — replaces [project.optional-dependencies] for uv users)
 # ---------------------------------------------------------------------------
 [dependency-groups]
-dev = [
+# Core test suite
+testing = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
+    "types-pyyaml",     # mypy stubs for pyyaml
+    "types-psutil",     # mypy stubs for psutil
+]
+# Code quality tools
+linting = [
     "ruff>=0.14.0",
     "mypy>=1.10.0",
     "deptry>=0.23.0",
     "pre-commit>=3.7.0",
-    "types-pyyaml",
-    "types-psutil",
+]
+# Adapter integration / smoke tests
+adapter-testing = [
+    "whatsplay>=1.9.8",   # WhatsApp Web automation (whatsapp_playwright adapter)
+]
+# Top-level dev group — includes all sub-groups
+dev = [
+    { include-group = "testing" },
+    { include-group = "linting" },
+    { include-group = "adapter-testing" },
 ]
 
 # ---------------------------------------------------------------------------
@@ -143,4 +171,4 @@ addopts      = "-v --cov=src --cov-report=term-missing"
 package_module_name_map = { "pyyaml" = "yaml" }
 per_rule_ignores = { "DEP002" = ["aiosqlite", "playwright", "whatsplay", "aiomysql", "asyncpg"] }
 # Also ignore dev and docs in PEP 621
-pep621_dev_dependency_groups = ["dev", "docs"]
+pep621_dev_dependency_groups = ["testing", "linting", "adapter-testing", "dev", "docs"]

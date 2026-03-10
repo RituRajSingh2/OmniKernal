@@ -919,6 +919,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+adapter-testing = [
+    { name = "whatsplay" },
+]
 database-extras = [
     { name = "aiomysql" },
     { name = "aiosqlite" },
@@ -932,14 +935,29 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "whatsplay" },
 ]
 docs = [
     { name = "mkdocs" },
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
 ]
+linting = [
+    { name = "deptry" },
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "ruff" },
+]
+testing = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+]
 
 [package.dev-dependencies]
+adapter-testing = [
+    { name = "whatsplay" },
+]
 dev = [
     { name = "deptry" },
     { name = "mypy" },
@@ -948,6 +966,20 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-psutil" },
+    { name = "types-pyyaml" },
+    { name = "whatsplay" },
+]
+linting = [
+    { name = "deptry" },
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "ruff" },
+]
+testing = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
     { name = "types-psutil" },
     { name = "types-pyyaml" },
 ]
@@ -959,26 +991,31 @@ requires-dist = [
     { name = "aiosqlite", marker = "extra == 'database-extras'", specifier = ">=0.20.0" },
     { name = "asyncpg", marker = "extra == 'database-extras'", specifier = ">=0.29.0" },
     { name = "cryptography", specifier = ">=46.0.5" },
-    { name = "deptry", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "deptry", marker = "extra == 'linting'", specifier = ">=0.23.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.6.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5.0" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.25.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
+    { name = "mypy", marker = "extra == 'linting'", specifier = ">=1.10.0" },
+    { name = "omnikernal", extras = ["adapter-testing"], marker = "extra == 'dev'" },
+    { name = "omnikernal", extras = ["linting"], marker = "extra == 'dev'" },
+    { name = "omnikernal", extras = ["testing"], marker = "extra == 'dev'" },
     { name = "playwright", specifier = ">=1.58.0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7.0" },
+    { name = "pre-commit", marker = "extra == 'linting'", specifier = ">=3.7.0" },
     { name = "psutil", specifier = ">=7.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
+    { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'testing'", specifier = ">=0.23.0" },
+    { name = "pytest-cov", marker = "extra == 'testing'", specifier = ">=5.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.0" },
+    { name = "ruff", marker = "extra == 'linting'", specifier = ">=0.14.0" },
     { name = "sqlalchemy", specifier = ">=2.0.47" },
     { name = "whatsplay", specifier = ">=1.9.8" },
+    { name = "whatsplay", marker = "extra == 'adapter-testing'", specifier = ">=1.9.8" },
 ]
-provides-extras = ["dev", "docs", "database-extras"]
+provides-extras = ["testing", "linting", "adapter-testing", "dev", "docs", "database-extras"]
 
 [package.metadata.requires-dev]
+adapter-testing = [{ name = "whatsplay", specifier = ">=1.9.8" }]
 dev = [
     { name = "deptry", specifier = ">=0.23.0" },
     { name = "mypy", specifier = ">=1.10.0" },
@@ -987,6 +1024,20 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
     { name = "ruff", specifier = ">=0.14.0" },
+    { name = "types-psutil" },
+    { name = "types-pyyaml" },
+    { name = "whatsplay", specifier = ">=1.9.8" },
+]
+linting = [
+    { name = "deptry", specifier = ">=0.23.0" },
+    { name = "mypy", specifier = ">=1.10.0" },
+    { name = "pre-commit", specifier = ">=3.7.0" },
+    { name = "ruff", specifier = ">=0.14.0" },
+]
+testing = [
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-cov", specifier = ">=5.0.0" },
     { name = "types-psutil" },
     { name = "types-pyyaml" },
 ]

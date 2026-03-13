@@ -1,0 +1,4 @@
+name: "whatsapp_baileys"
+platform: "whatsapp"
+version: "1.0.0"
+entry_class: "adapter.WhatsAppBaileysAdapter"

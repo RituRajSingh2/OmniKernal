@@ -18,10 +18,10 @@ Ph1  Microkernel Core Engine      ✅
 Ph2  Database Layer               ✅
 Ph2.5 Security & Resilience       ✅
 Ph3  Plugin Layer (v1)            ✅
-Ph4  Platform Adapter Layer       ✅ (scaffold)
+Ph4  Platform Adapter Layer       ✅
 Ph5  Profile Management           ✅
 Ph6  Execution Modes (Self/Coop)  ✅
-Ph7  Research & Benchmarking      🔄 (Comparative transport analysis)
+Ph7  Research & Benchmarking      ✅ (Adapters: Playwright, WAHA, Baileys)
 Ph8  Future (Redis, multi-node)   ❌ deferred
 ```
 
@@ -82,7 +82,9 @@ OmniKernal/
 │     └─ validator.py     AdapterValidator (descriptor + ABC check)
 ├─ adapter_packs/
 │  ├─ console_mock/       ConsoleMockAdapter (in-memory, for tests/CI)
-│  └─ whatsapp_playwright/ WhatsAppPlaywrightAdapter (scaffold, NotImplemented)
+│  ├─ whatsapp_playwright/ WhatsAppPlaywrightAdapter (UI-based, Native Browser)
+│  ├─ whatsapp_waha/       WhatsAppWahaAdapter (API-based, HTTP REST)
+│  └─ whatsapp_baileys/    WhatsAppBaileysAdapter (Socket-based, Node JS Bridge)
 ├─ plugins/
 │  └─ echo/               Reference plugin (smoke test)
 │     ├─ manifest.json
@@ -335,10 +337,7 @@ To maintain architectural evaluation integrity across sessions:
 3. **Intent:** Evaluates **UI-based (Playwright)** vs **API-based (WAHA)** vs **Socket-based (Baileys)**.
 
 ## WHAT IS NOT YET BUILT
-- WhatsApp Playwright adapter logic (Finalizing high-level mapping)
-- WAHA (HTTP API) adapter pack (Phase 7 Research Target)
-- Baileys (Socket) adapter pack (Phase 7 Research Target)
-- Comparative Performance Matrix (Phase 7 Research)
+- Comparative Performance Matrix (Phase 7 Research Data Collection)
 - Rate limiting enforcement (declared in `permissions.json`, not wired)
 - Named services in `ctx.get_api_key(service)` (BUG 55 — currently ignores `service` arg)
 - Hot-reload of plugins

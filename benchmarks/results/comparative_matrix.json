@@ -1,0 +1,29 @@
+[
+  {
+    "adapter": "whatsapp_baileys",
+    "boot_time_s": 3.01,
+    "ram_mb": 168.67,
+    "mean_latency_ms": 11.83,
+    "max_latency_ms": 32.27,
+    "jitter_ms": 11.44,
+    "timestamp": "2026-03-13T19:21:52.448665+00:00"
+  },
+  {
+    "adapter": "whatsapp_waha",
+    "boot_time_s": 4.1,
+    "ram_mb": 816.92,
+    "mean_latency_ms": 10.45,
+    "max_latency_ms": 18.3,
+    "jitter_ms": 4.49,
+    "timestamp": "2026-03-13T19:22:01.150521+00:00"
+  },
+  {
+    "adapter": "whatsapp_playwright",
+    "boot_time_s": 4.26,
+    "ram_mb": 532.32,
+    "mean_latency_ms": 40361.47,
+    "max_latency_ms": 40405.5,
+    "jitter_ms": 39.31,
+    "timestamp": "2026-03-13T19:24:06.560327+00:00"
+  }
+]

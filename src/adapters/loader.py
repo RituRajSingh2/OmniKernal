@@ -30,7 +30,7 @@ class AdapterLoader:
         self.validator = AdapterValidator()
         self.logger = core_logger.bind(subsystem="adapter_loader")
 
-    def load(self, pack_name: str) -> PlatformAdapter:
+    def load(self, pack_name: str, **kwargs) -> PlatformAdapter:
         """
         Loads an adapter pack by name.
 
@@ -39,18 +39,14 @@ class AdapterLoader:
           2. Validates the descriptor schema
           3. Dynamically imports the entry_class
           4. Validates ABC compliance
-          5. Returns an instance
+          5. Returns an instance with optional kwargs
 
         Args:
             pack_name: Name of the adapter pack folder.
+            **kwargs: Arguments to pass to the adapter class constructor.
 
         Returns:
             A PlatformAdapter instance ready for Core.
-
-        Raises:
-            FileNotFoundError: If the pack directory or descriptor is missing.
-            ValueError: If the descriptor is invalid.
-            TypeError: If the class doesn't implement PlatformAdapter.
         """
         # BUG 117 fix: sanitize pack_name to prevent directory traversal
         # Only allow alphanumeric and underscore characters.
@@ -92,7 +88,7 @@ class AdapterLoader:
         self.validator.validate_class(cls)
 
         # 5. Instantiate and return
-        instance = cast(PlatformAdapter, cls())
+        instance = cast(PlatformAdapter, cls(**kwargs))
         self.logger.info(f"Adapter loaded: {instance.platform_name} (v{descriptor['version']})")
         return instance
 

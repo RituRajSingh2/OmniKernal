@@ -1,0 +1,4 @@
+name: whatsapp_waha
+platform: whatsapp
+version: "0.1.0"
+entry_class: "adapter.WhatsAppWahaAdapter"

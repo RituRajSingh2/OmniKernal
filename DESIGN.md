@@ -27,11 +27,11 @@ Every adapter implementation must satisfy these 4 async methods:
 *   `send_message(to, content)`: Interaction logic (Clicking / POSTing).
 *   `disconnect()`: Cleanup.
 
-## 5. Phase 7: The Research Matrix
+## 5. Phase 7: The Research Matrix (Status: Implementations Complete ✅)
 We evaluate the Core against three transport layers:
-1. **UI-Based (Playwright):** High Resource/High Latency. (Research: DOM overhead).
-2. **API-Based (HTTP/WAHA):** Medium Resource/Low Latency. (Research: Process decoupling).
-3. **Socket-Based (Baileys):** Lowest Resource/Lowest Latency. (Research: Real-time efficiency).
+1. **UI-Based (Playwright):** ✅ Implemented (`whatsapp_playwright`). High Resource/High Latency. (Research: DOM overhead).
+2. **API-Based (HTTP/WAHA):** ✅ Implemented (`whatsapp_waha`). Medium Resource/Low Latency. (Research: Process decoupling).
+3. **Socket-Based (Baileys):** ✅ Implemented (`whatsapp_baileys`). Lowest Resource/Lowest Latency. (Research: Real-time efficiency).
 
 ## 6. Future Intent (Phase 8 Roadmap)
 | Feature | Intent |

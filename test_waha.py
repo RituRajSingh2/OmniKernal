@@ -33,6 +33,11 @@ from adapter_packs.whatsapp_waha.adapter import WhatsAppWahaAdapter
 
 WAHA_URL     = os.getenv("WAHA_URL", "http://localhost:3000")
 SESSION_NAME = os.getenv("WAHA_SESSION", "default")
+WAHA_API_KEY = os.getenv("WAHA_API_KEY", "omnikernal_secret")
+
+# Ensure the adapter can pick it up via env variable if we pass it down
+if "WAHA_API_KEY" not in os.environ:
+    os.environ["WAHA_API_KEY"] = WAHA_API_KEY
 
 
 async def main() -> None:

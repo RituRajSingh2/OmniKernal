@@ -247,67 +247,104 @@ class WhatsAppWahaAdapter(PlatformAdapter):
         result: list[Message] = []
 
         try:
-            # GET /api/messages returns messages across ALL chats
-            # We use min_timestamp to skip already-seen messages
-            params = {
-                "session": self._session_name,
-                "limit": str(_POLL_LIMIT),
-            }
-            raw = await self._get("/api/messages", params=params)
+            # 1. Fetch all chats to find which ones have unread messages
+            chats = await self._get(f"/api/{self._session_name}/chats")
+            if not isinstance(chats, list):
+                return []
+            
+            unread_chats = [c for c in chats if c.get("unreadCount", 0) > 0]
+            if not unread_chats:
+                return []
+
+            latest_ts = self._last_seen_ts
+
+            # 2. For each unread chat, fetch its recent messages
+            for chat in unread_chats:
+                chat_id_obj = chat.get("id", {})
+                chat_id = chat_id_obj.get("_serialized") or chat_id_obj.get("user")
+                unread_count = chat.get("unreadCount", 1)
+
+                if not chat_id:
+                    continue
+
+                params = {
+                    "session": self._session_name,
+                    "chatId": chat_id,
+                    "limit": str(max(unread_count, 10)),  # grab a bit of context just in case
+                }
+                messages_data = await self._get("/api/messages", params=params)
+                
+                # WAHA /messages returns an array of message objects
+                if isinstance(messages_data, list):
+                    for item in messages_data:
+                        if not isinstance(item, dict):
+                            continue
+                            
+                        raw_id = item.get("id", "")
+                        if isinstance(raw_id, dict):
+                            msg_id = raw_id.get("_serialized", "") or str(raw_id)
+                        else:
+                            msg_id = str(raw_id)
+                            
+                        from_me   = item.get("fromMe", False)
+                        timestamp = item.get("timestamp", 0)   # Unix int
+                        body      = item.get("body", "") or ""
+                        
+                        # Sender identification: groups vs direct messages
+                        from_field = item.get("from", chat_id)
+                        
+                        # In WAHA, group messages put the sender's phone in `participant` or `author` inside `lastMessage._data`
+                        author = item.get("author", "")
+                        sender_id = author if author else from_field
+
+                        # Skip: outgoing, already processed, older than boot time
+                        if from_me:
+                            continue
+                        if msg_id in self._processed_ids:
+                            continue
+                        # If a message is too old we still process it if it's unread, 
+                        # but we can honor the boot timestamp limit
+                        if timestamp <= self._last_seen_ts:
+                            continue
+
+                        self._processed_ids.add(msg_id)
+
+                        if timestamp > latest_ts:
+                            latest_ts = timestamp
+
+                        body = body.strip()
+                        if not body:
+                            continue
+
+                        # Parse display name
+                        display = sender_id.split("@")[0] if isinstance(sender_id, str) and "@" in sender_id else str(sender_id)
+
+                        user = User(
+                            id=chat_id,  # Ensure replies go to the chat itself (important for groups)
+                            display_name=display,
+                            platform=self._platform_name,
+                        )
+                        msg = Message(
+                            id=str(msg_id),
+                            raw_text=body,
+                            user=user,
+                            timestamp=datetime.fromtimestamp(timestamp, tz=timezone.utc),
+                            platform=self._platform_name,
+                        )
+                        result.append(msg)
+                        print(f"[WahaAdapter] 📨 {display}: {body!r}")
+
+                # 3. Mark the chat as seen so we don't fetch it again on next poll
+                await self._post("/api/sendSeen", {
+                    "session": self._session_name,
+                    "chatId": chat_id
+                })
+
         except Exception as e:
+            import traceback
             print(f"[WahaAdapter] Warning: fetch failed: {e}")
+            traceback.print_exc()
             return []
-
-        if not isinstance(raw, list):
-            return []
-
-        latest_ts = self._last_seen_ts
-
-        for item in raw:
-            msg_id    = item.get("id", "")
-            from_me   = item.get("fromMe", False)
-            timestamp = item.get("timestamp", 0)   # Unix int
-            body      = item.get("body", "") or ""
-            from_field = item.get("from", "") or ""
-            chat_id   = item.get("chatId", from_field) or from_field
-
-            # Skip: outgoing, already processed, older than boot time
-            if from_me:
-                continue
-            if msg_id in self._processed_ids:
-                continue
-            if timestamp <= self._last_seen_ts:
-                continue
-
-            self._processed_ids.add(msg_id)
-
-            # Track latest timestamp for next call
-            if timestamp > latest_ts:
-                latest_ts = timestamp
-
-            # Skip empty bodies (media without caption, etc.)
-            body = body.strip()
-            if not body:
-                continue
-
-            # Parse sender — strip @c.us / @g.us suffix for display
-            sender_id = from_field
-            display   = sender_id.split("@")[0] if "@" in sender_id else sender_id
-
-            user = User(
-                id=sender_id,
-                display_name=display,
-                platform=self._platform_name,
-            )
-            msg = Message(
-                id=msg_id,
-                raw_text=body,
-                user=user,
-                timestamp=datetime.fromtimestamp(timestamp, tz=timezone.utc),
-                platform=self._platform_name,
-            )
-            result.append(msg)
-            print(f"[WahaAdapter] 📨 {display}: {body!r}")
 
         # Advance the watermark so next poll skips these
         self._last_seen_ts = latest_ts

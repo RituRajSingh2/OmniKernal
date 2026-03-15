@@ -155,7 +155,7 @@ Python ≥ 3.12, SQLAlchemy 2.x (async), SQLite + aiosqlite, `cryptography` (Fer
 
 ### 5.1 Experimental Setup
 
-All benchmarks run on a real `OmniKernal` instance using the `console_mock` adapter—an in-memory adapter that eliminates network I/O—ensuring measurements reflect core engine overhead only. The shared harness (`harness.py`) provides engine bootstrapping, `time.perf_counter()` timing (μs precision), and JSON result serialization. Platform: Windows 10/11, Python ≥ 3.12, SQLite.
+All benchmarks run on a real `OmniKernal` instance using the `console_mock` adapter—an in-memory adapter that eliminates network I/O—ensuring measurements reflect core engine overhead only. The shared harness (`harness.py`) provides engine bootstrapping, `time.perf_counter()` timing (μs precision), and JSON result serialization. Platform: Windows 10/11, Python ≥ 3.12, SQLite. All experiments were conducted for academic benchmarking purposes using publicly available open-source libraries; no attempt was made to bypass platform security mechanisms or violate service policies.
 
 ### 5.2 Benchmark Results
 
